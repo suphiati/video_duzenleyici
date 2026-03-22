@@ -50,4 +50,7 @@ export const api = {
 
     // Slideshow
     createSlideshow: (data) => request('/api/slideshow/create', { method: 'POST', body: JSON.stringify(data) }),
+
+    // Video Mix
+    createVideoMix: (data) => request('/api/videomix/create', { method: 'POST', body: JSON.stringify(data) }),
 };

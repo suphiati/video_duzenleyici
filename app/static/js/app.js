@@ -770,6 +770,146 @@ app.createSlideshow = async () => {
     }
 };
 
+// ─── Video Mix Dialog ───
+app.showVideoMixDialog = () => {
+    const html = `
+        <p style="font-size:13px;margin-bottom:12px">
+            Medya kutuphanesindeki videolardan otomatik montaj/mix olusturun.
+            Her videodan parcalar kesilip karistirilarak istenen surede bir video uretilir.
+        </p>
+        <div class="prop-row">
+            <label>Hedef Sure</label>
+            <select id="mixTargetPreset" onchange="document.getElementById('mixTargetCustom').style.display = this.value==='custom' ? 'block' : 'none'">
+                <option value="30">30 saniye</option>
+                <option value="60" selected>1 dakika</option>
+                <option value="120">2 dakika</option>
+                <option value="180">3 dakika</option>
+                <option value="300">5 dakika</option>
+                <option value="600">10 dakika</option>
+                <option value="custom">Ozel...</option>
+            </select>
+        </div>
+        <div class="prop-row" id="mixTargetCustom" style="display:none">
+            <label>Ozel sure (saniye)</label>
+            <input type="number" id="mixCustomDuration" value="90" min="10" step="1">
+        </div>
+        <div class="prop-row">
+            <label>Klip suresi (sn)</label>
+            <input type="number" id="mixClipDuration" value="5" min="1" max="30" step="0.5">
+            <small style="color:var(--text-muted);font-size:11px">Her segmentin uzunlugu</small>
+        </div>
+        <div class="prop-row">
+            <label>Gecis efekti</label>
+            <select id="mixTransition">
+                <option value="fade">Solma</option>
+                <option value="dissolve">Erime</option>
+                <option value="wipeleft">Silme (Sol)</option>
+                <option value="wiperight">Silme (Sag)</option>
+                <option value="slideright">Kayma (Sag)</option>
+                <option value="slideleft">Kayma (Sol)</option>
+                <option value="none">Gecis Yok (Hizli)</option>
+            </select>
+        </div>
+        <div class="prop-row">
+            <label>Gecis suresi (sn)</label>
+            <input type="number" id="mixTransDuration" value="0.5" min="0.1" max="2" step="0.1">
+        </div>
+        <div class="prop-row">
+            <label>
+                <input type="checkbox" id="mixShuffle" checked>
+                Klipleri karistir (rastgele sira)
+            </label>
+        </div>
+        <p style="font-size:11px;color:var(--text-muted);margin-top:8px">
+            Kutuphanedeki tum videolar kullanilir. En az 2 video gerekli.
+        </p>
+    `;
+    showModal('Video Mix Olustur', html, [
+        { text: 'Iptal', class: '', onclick: 'closeModal()' },
+        { text: 'Mix Olustur', class: 'primary', onclick: 'app.createVideoMix()' },
+    ]);
+};
+
+app.createVideoMix = async () => {
+    let media;
+    try {
+        media = await api.listMedia();
+    } catch (e) {
+        toast('Medya listesi alinamadi: ' + e.message, 'error');
+        return;
+    }
+    const videos = media.media.filter(m => m.media_type === 'video').map(m => m.path);
+    if (videos.length < 2) {
+        toast('En az 2 video gerekli. Kutuphaneden video ekleyin.', 'error');
+        return;
+    }
+
+    const presetVal = document.getElementById('mixTargetPreset')?.value || '60';
+    const targetDuration = presetVal === 'custom'
+        ? (parseFloat(document.getElementById('mixCustomDuration')?.value) || 90)
+        : parseFloat(presetVal);
+
+    const clipDuration = parseFloat(document.getElementById('mixClipDuration')?.value) || 5;
+    const transition = document.getElementById('mixTransition')?.value || 'fade';
+    const transDur = parseFloat(document.getElementById('mixTransDuration')?.value) || 0.5;
+    const shuffle = document.getElementById('mixShuffle')?.checked ?? true;
+
+    closeModal();
+
+    // Show progress modal
+    showModal('Video Mix Olusturuluyor...', `
+        <div class="export-progress">
+            <div class="progress-bar"><div class="fill" id="mixFill" style="width:0%"></div></div>
+            <div class="progress-text" id="mixText">
+                ${videos.length} videodan ${Math.ceil(targetDuration / clipDuration)} segment kesilecek...
+                <br>Bu islem birka\u00e7 dakika surebilir.
+            </div>
+        </div>
+    `);
+
+    // Animate progress bar while waiting
+    let progress = 0;
+    const progressInterval = setInterval(() => {
+        progress = Math.min(progress + 0.5, 90);
+        const fill = document.getElementById('mixFill');
+        if (fill) fill.style.width = progress + '%';
+    }, 500);
+
+    try {
+        const result = await api.createVideoMix({
+            videos,
+            target_duration: targetDuration,
+            clip_duration: clipDuration,
+            transition,
+            transition_duration: transDur,
+            shuffle,
+        });
+
+        clearInterval(progressInterval);
+
+        // Show completion
+        const durMin = Math.floor(result.total_duration / 60);
+        const durSec = Math.floor(result.total_duration % 60);
+        showModal('Video Mix Tamamlandi!', `
+            <p><b>${result.segments.length}</b> segment birlestirildi</p>
+            <p>Sure: <b>${durMin}:${durSec.toString().padStart(2, '0')}</b></p>
+            <p>Boyut: <b>${formatSize(result.size)}</b></p>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:8px">Dosya: ${escHtml(result.output)}</p>
+        `, [{ text: 'Tamam', class: 'primary', onclick: 'closeModal()' }]);
+
+        toast('Video mix olusturuldu!', 'success');
+
+        // Import the result
+        await api.importMedia([result.output]);
+        await refreshMediaLibrary();
+    } catch (e) {
+        clearInterval(progressInterval);
+        showModal('Hata', `<p style="color:var(--danger)">${escHtml(e.message)}</p>`,
+            [{ text: 'Kapat', class: '', onclick: 'closeModal()' }]);
+        toast('Video mix olusturulamadi: ' + e.message, 'error');
+    }
+};
+
 // ─── Modal ───
 function showModal(title, bodyHtml, buttons = []) {
     const btnHtml = buttons.map(b =>

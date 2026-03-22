@@ -305,6 +305,270 @@ def create_slideshow(
     return output_path
 
 
+def create_video_mix(
+    video_infos: list[dict],
+    target_duration: float,
+    clip_duration: float,
+    transition: str,
+    transition_duration: float,
+    shuffle: bool,
+    resolution: str,
+    output_path: str,
+) -> dict:
+    """
+    Create a video mix/montage from multiple source videos.
+
+    Cuts segments from each video, optionally shuffles them, and concatenates
+    with transitions to create a montage of the requested duration.
+
+    Args:
+        video_infos: list of {"path": str, "duration": float}
+        target_duration: desired output duration in seconds
+        clip_duration: how long each segment should be
+        transition: xfade transition type (fade, dissolve, wipeleft, etc.)
+        transition_duration: transition duration in seconds
+        shuffle: randomize segment order
+        resolution: output resolution e.g. "1920x1080"
+        output_path: where to save the final video
+
+    Returns:
+        {"segments": [...], "total_duration": float}
+    """
+    import random
+    import math
+
+    w, h = resolution.split("x")
+
+    # ── 1. Plan segments ──
+    # Distribute target_duration across source videos
+    num_videos = len(video_infos)
+    num_segments_needed = math.ceil(target_duration / clip_duration)
+
+    segments = []  # list of {"path", "start", "end", "source_idx"}
+
+    # Round-robin across videos to pick segments
+    for seg_idx in range(num_segments_needed):
+        src_idx = seg_idx % num_videos
+        src = video_infos[src_idx]
+        src_dur = src["duration"]
+
+        # How many segments have we already picked from this source?
+        existing = [s for s in segments if s["source_idx"] == src_idx]
+        n_existing = len(existing)
+
+        # Calculate start time: spread segments evenly across the source
+        # Avoid picking the same region twice
+        available_dur = src_dur - clip_duration
+        if available_dur <= 0:
+            # Source is shorter than clip_duration, use full source
+            start = 0
+            end = min(src_dur, clip_duration)
+        else:
+            # Spread evenly
+            step = available_dur / max(1, math.ceil(num_segments_needed / num_videos))
+            start = (n_existing * step) % available_dur
+            end = start + clip_duration
+            if end > src_dur:
+                start = max(0, src_dur - clip_duration)
+                end = src_dur
+
+        segments.append({
+            "path": src["path"],
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "source_idx": src_idx,
+        })
+
+    if shuffle:
+        random.shuffle(segments)
+
+    # Trim total to target_duration
+    accumulated = 0
+    trimmed_segments = []
+    for seg in segments:
+        seg_dur = seg["end"] - seg["start"]
+        if accumulated + seg_dur > target_duration + 1:
+            # Shorten last segment
+            remaining = target_duration - accumulated
+            if remaining > 0.5:
+                seg["end"] = seg["start"] + remaining
+                trimmed_segments.append(seg)
+                accumulated += remaining
+            break
+        trimmed_segments.append(seg)
+        accumulated += seg_dur
+
+    segments = trimmed_segments
+
+    if not segments:
+        raise ValueError("Yeterli segment olusturulamadi")
+
+    # ── 2. Extract each segment with FFmpeg ──
+    temp_clips = []
+    temp_files = []
+    try:
+        for i, seg in enumerate(segments):
+            temp_path = str(TEMP_DIR / f"mix_seg_{i}.mp4")
+            temp_files.append(temp_path)
+
+            seg_dur = seg["end"] - seg["start"]
+            cmd = [
+                FFMPEG_BIN, "-y",
+                "-ss", str(seg["start"]),
+                "-t", str(seg_dur),
+                "-i", seg["path"],
+                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                       f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                "-movflags", "+faststart",
+                temp_path,
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace"
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Segment {i} kesilemedi: {result.stderr[-300:]}")
+            temp_clips.append(temp_path)
+
+        # ── 3. Concatenate with transitions ──
+        if len(temp_clips) == 1:
+            # Single clip, just copy
+            import shutil
+            shutil.copy2(temp_clips[0], output_path)
+        elif len(temp_clips) <= 3 or transition == "none":
+            # Use concat demuxer (fast, no transitions) for many clips
+            _concat_with_demuxer(temp_clips, output_path)
+        else:
+            # Use xfade transitions (limited by FFmpeg complexity)
+            _concat_with_xfade(temp_clips, output_path, transition, transition_duration, w, h)
+
+        actual_dur = _get_duration(output_path)
+        return {
+            "segments": [
+                {"source": os.path.basename(s["path"]), "start": s["start"], "end": s["end"]}
+                for s in segments
+            ],
+            "total_duration": actual_dur,
+        }
+
+    finally:
+        for tf in temp_files:
+            try:
+                Path(tf).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _concat_with_demuxer(clips: list[str], output_path: str):
+    """Fast concat using demuxer (no transitions, but handles many clips)."""
+    list_file = str(TEMP_DIR / "mix_concat.txt")
+    with open(list_file, "w", encoding="utf-8") as f:
+        for c in clips:
+            safe = c.replace("\\", "/").replace("'", "'\\''")
+            f.write(f"file '{safe}'\n")
+
+    cmd = [
+        FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0",
+        "-i", list_file, "-c", "copy",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        Path(list_file).unlink(missing_ok=True)
+    except Exception:
+        pass
+    if result.returncode != 0:
+        raise RuntimeError(f"Concat hatasi: {result.stderr[-500:]}")
+
+
+def _concat_with_xfade(clips: list[str], output_path: str,
+                        transition: str, trans_dur: float, w: str, h: str):
+    """Concat with xfade transitions. Falls back to demuxer if too many clips."""
+    # xfade becomes very slow with >20 clips, use demuxer fallback
+    if len(clips) > 20:
+        return _concat_with_demuxer(clips, output_path)
+
+    cmd = [FFMPEG_BIN, "-y"]
+    for c in clips:
+        cmd.extend(["-i", c])
+
+    # Get durations for offset calculation
+    durations = []
+    for c in clips:
+        d = _get_duration(c)
+        durations.append(d if d > 0 else 5.0)
+
+    # Build xfade filter chain
+    filter_parts = []
+    # First, prepare all video streams
+    for i in range(len(clips)):
+        filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS[v{i}]")
+
+    # Chain xfade
+    cumulative_offset = 0
+    prev_label = "[v0]"
+    for i in range(1, len(clips)):
+        cumulative_offset += durations[i - 1] - trans_dur
+        if cumulative_offset < 0:
+            cumulative_offset = 0
+        out_label = f"[xf{i}]" if i < len(clips) - 1 else "[vout]"
+        filter_parts.append(
+            f"{prev_label}[v{i}]xfade=transition={transition}:"
+            f"duration={trans_dur}:offset={cumulative_offset}{out_label}"
+        )
+        prev_label = out_label
+        # Adjust cumulative offset: after xfade the output duration is shorter
+        # The output of xfade is: duration[0..i] - (i * trans_dur)
+        # Reset cumulative for next iteration
+        cumulative_offset = sum(durations[:i + 1]) - i * trans_dur - trans_dur
+
+    # Audio: concat audio streams
+    audio_inputs = "".join(f"[{i}:a]" for i in range(len(clips)))
+    filter_parts.append(f"{audio_inputs}concat=n={len(clips)}:v=0:a=1[aout]")
+
+    filter_str = ";".join(filter_parts)
+
+    cmd.extend([
+        "-filter_complex", filter_str,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        output_path,
+    ])
+
+    result = subprocess.run(
+        cmd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+        timeout=600,  # 10 minute timeout
+    )
+    if result.returncode != 0:
+        # Fallback to demuxer on xfade failure
+        try:
+            _concat_with_demuxer(clips, output_path)
+        except Exception:
+            raise RuntimeError(f"Video birlestirme hatasi: {result.stderr[-500:]}")
+
+
+def _get_duration(file_path: str) -> float:
+    """Get duration of a media file using ffprobe."""
+    from app.config import FFPROBE_BIN as probe_bin
+    import json as _json
+    cmd = [
+        probe_bin, "-v", "quiet", "-print_format", "json",
+        "-show_format", file_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        data = _json.loads(result.stdout)
+        return float(data.get("format", {}).get("duration", 0))
+    except Exception:
+        return 0
+
+
 def _generate_ass(subtitles: list[dict], output_path: str):
     """Generate ASS subtitle file."""
     lines = [

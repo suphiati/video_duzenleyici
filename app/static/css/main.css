@@ -40,7 +40,14 @@
 .header .spacer { flex: 1; }
 .header .btn-group {
     display: flex;
-    gap: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+.header .btn-group button {
+    font-size: 12px;
+    padding: 4px 8px;
+    white-space: nowrap;
 }
 
 /* Media Panel (Left) */
