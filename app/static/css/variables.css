@@ -1,0 +1,90 @@
+:root {
+    --bg-primary: #1a1a2e;
+    --bg-secondary: #16213e;
+    --bg-tertiary: #0f3460;
+    --bg-panel: #1e2a4a;
+    --bg-hover: #2a3a5e;
+    --bg-active: #3a4a7e;
+    --text-primary: #e0e0e0;
+    --text-secondary: #a0a0b0;
+    --text-muted: #6a6a7a;
+    --accent: #e94560;
+    --accent-hover: #ff6b81;
+    --accent-secondary: #0ea5e9;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --danger: #ef4444;
+    --border: #2a3a5e;
+    --shadow: rgba(0, 0, 0, 0.3);
+    --radius: 8px;
+    --radius-sm: 4px;
+    --transition: 0.2s ease;
+    --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    font-family: var(--font);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    overflow: hidden;
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track {
+    background: var(--bg-secondary);
+}
+::-webkit-scrollbar-thumb {
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--bg-active);
+}
+
+button {
+    cursor: pointer;
+    border: none;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    padding: 8px 16px;
+    border-radius: var(--radius-sm);
+    font-family: var(--font);
+    font-size: 13px;
+    transition: background var(--transition);
+}
+button:hover {
+    background: var(--bg-active);
+}
+button.primary {
+    background: var(--accent);
+}
+button.primary:hover {
+    background: var(--accent-hover);
+}
+button.secondary {
+    background: var(--accent-secondary);
+}
+
+input, select, textarea {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    font-family: var(--font);
+    font-size: 13px;
+}
+input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent-secondary);
+}

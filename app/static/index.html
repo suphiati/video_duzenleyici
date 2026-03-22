@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Duzenleyici</title>
+    <link rel="stylesheet" href="/static/css/variables.css">
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/timeline.css">
+</head>
+<body>
+    <div class="app" id="app">
+        <!-- Header -->
+        <header class="header">
+            <span class="logo">Video Duzenleyici</span>
+            <input class="project-name" id="projectName" value="Yeni Proje" placeholder="Proje Adi">
+            <span class="spacer"></span>
+            <div class="btn-group">
+                <button onclick="app.newProject()">Yeni</button>
+                <button onclick="app.showProjectList()">Proje Ac</button>
+                <button onclick="app.saveProject()">Kaydet</button>
+                <button onclick="app.showSlideshowDialog()">Slayt Gosterisi</button>
+                <button class="primary" onclick="app.startExport()">Disa Aktar</button>
+            </div>
+        </header>
+
+        <!-- Media Panel (Left) -->
+        <div class="media-panel">
+            <div class="panel-tabs">
+                <button class="panel-tab active" id="tabBrowser" onclick="app.switchTab('browser')">Dosya Gezgini</button>
+                <button class="panel-tab" id="tabLibrary" onclick="app.switchTab('library')">Kutuphe</button>
+            </div>
+
+            <!-- File Browser -->
+            <div class="file-browser" id="fileBrowser">
+                <div class="browser-path">
+                    <button onclick="app.goUp()" title="Ust Klasor">&#8593;</button>
+                    <input id="pathInput" value="C:\\" onkeydown="if(event.key==='Enter')app.browsePath(this.value)">
+                    <button onclick="app.browsePath(document.getElementById('pathInput').value)">Git</button>
+                </div>
+                <div class="file-list" id="fileList"></div>
+            </div>
+
+            <!-- Media Library -->
+            <div class="media-library" id="mediaLibrary" style="display:none"></div>
+        </div>
+
+        <!-- Preview Area (Center) -->
+        <div class="preview-area">
+            <div class="video-container" id="videoContainer">
+                <div class="placeholder" id="videoPlaceholder">Onizlemek icin bir medya secin</div>
+                <video id="videoPlayer" style="display:none"></video>
+            </div>
+            <div class="player-controls">
+                <button id="playBtn" onclick="app.togglePlay()">&#9654;</button>
+                <span class="time" id="timeDisplay">00:00 / 00:00</span>
+                <input type="range" class="seek-bar" id="seekBar" min="0" max="100" value="0" step="0.1"
+                    oninput="app.seek(this.value)">
+                <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" value="1" step="0.05"
+                    oninput="app.setVolume(this.value)">
+                <div class="trim-controls">
+                    <button onclick="app.setInPoint()">[ Bas</button>
+                    <button onclick="app.setOutPoint()">Son ]</button>
+                    <button onclick="app.addSelectedToTimeline()" class="secondary">+ Timeline</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Properties Panel (Right) -->
+        <div class="properties-panel" id="propertiesPanel">
+            <div class="prop-section">
+                <h3>Medya Bilgisi</h3>
+                <div id="mediaInfoDisplay">
+                    <p style="color:var(--text-muted);font-size:12px">Medya secilmedi</p>
+                </div>
+            </div>
+            <div class="prop-section" id="clipPropsSection" style="display:none">
+                <h3>Klip Ozellikleri</h3>
+                <div class="prop-row">
+                    <label>Baslangic</label>
+                    <input type="number" id="clipInPoint" step="0.1" min="0" onchange="app.updateClipProp()">
+                </div>
+                <div class="prop-row">
+                    <label>Bitis</label>
+                    <input type="number" id="clipOutPoint" step="0.1" min="0" onchange="app.updateClipProp()">
+                </div>
+            </div>
+            <div class="prop-section" id="audioPropsSection" style="display:none">
+                <h3>Ses Ozellikleri</h3>
+                <div class="prop-row">
+                    <label>Ses Seviyesi</label>
+                    <input type="range" id="audioVolume" min="0" max="2" step="0.1" value="1" onchange="app.updateAudioProp()">
+                    <span id="audioVolumeLabel">100%</span>
+                </div>
+                <div class="prop-row">
+                    <label>Giris (sn)</label>
+                    <input type="number" id="audioFadeIn" step="0.5" min="0" value="0" onchange="app.updateAudioProp()">
+                </div>
+                <div class="prop-row">
+                    <label>Cikis (sn)</label>
+                    <input type="number" id="audioFadeOut" step="0.5" min="0" value="0" onchange="app.updateAudioProp()">
+                </div>
+            </div>
+            <div class="prop-section">
+                <h3>Altyazilar</h3>
+                <button onclick="app.addSubtitleAtCurrent()" style="width:100%;margin-bottom:8px">+ Altyazi Ekle</button>
+                <div class="subtitle-list" id="subtitleList"></div>
+            </div>
+        </div>
+
+        <!-- Timeline Area (Bottom) -->
+        <div class="timeline-area">
+            <div class="timeline-toolbar">
+                <span class="label">Zaman Cizelgesi</span>
+                <span class="spacer"></span>
+                <button onclick="app.addMusicDialog()">+ Muzik</button>
+            </div>
+            <div class="timeline-tracks">
+                <div class="track">
+                    <div class="track-label">Video</div>
+                    <div class="track-content" id="videoTrack">
+                        <div class="track-empty">Medya kutuphanesinden klip ekleyin</div>
+                    </div>
+                </div>
+                <div class="track">
+                    <div class="track-label">Ses</div>
+                    <div class="track-content" id="audioTrack">
+                        <div class="track-empty">Muzik eklemek icin + Muzik butonuna basin</div>
+                    </div>
+                </div>
+                <div class="track">
+                    <div class="track-label">Altyazi</div>
+                    <div class="track-content" id="subtitleTrack">
+                        <div class="track-empty">Altyazi eklemek icin sag paneli kullanin</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal container -->
+    <div id="modalContainer"></div>
+
+    <script src="/static/vendor/sortable.min.js"></script>
+    <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
