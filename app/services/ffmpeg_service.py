@@ -1,41 +1,50 @@
-import asyncio
+import subprocess
 import os
 import re
 from pathlib import Path
 
 from app.config import FFMPEG_BIN, TEMP_DIR, YOUTUBE_EXPORT_SETTINGS
 
+# ---------------------------------------------------------------------------
+# GPU encoder detection (cached)
+# ---------------------------------------------------------------------------
+_gpu_encoder_cache: str | None = "__unset__"
 
-async def detect_gpu_encoder() -> str | None:
-    """Detect available GPU encoder."""
+
+def detect_gpu_encoder() -> str | None:
+    """Detect available GPU encoder (cached after first call)."""
+    global _gpu_encoder_cache
+    if _gpu_encoder_cache != "__unset__":
+        return _gpu_encoder_cache
+
+    result = subprocess.run(
+        [FFMPEG_BIN, "-hide_banner", "-encoders"],
+        capture_output=True, text=True
+    )
     for encoder in ["h264_nvenc", "h264_amf", "h264_qsv"]:
-        cmd = [FFMPEG_BIN, "-hide_banner", "-encoders"]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        if encoder in stdout.decode():
-            return encoder
-    return None
+        if encoder in result.stdout:
+            _gpu_encoder_cache = encoder
+            return _gpu_encoder_cache
+    _gpu_encoder_cache = None
+    return _gpu_encoder_cache
 
 
-async def trim_clip(input_path: str, output_path: str, in_point: float, out_point: float):
+def trim_clip(input_path: str, output_path: str, in_point: float, out_point: float):
     """Trim a clip using stream copy (fast, no re-encoding)."""
     cmd = [FFMPEG_BIN, "-y", "-i", input_path]
     if in_point > 0:
         cmd.extend(["-ss", str(in_point)])
     if out_point > 0:
-        cmd.extend(["-to", str(out_point - in_point)])
+        # out_point is absolute time; duration = out_point - in_point
+        cmd.extend(["-t", str(out_point - in_point)])
+    # out_point == -1 means "rest of file from in_point" -- no -t needed
     cmd.extend(["-c", "copy", "-avoid_negative_ts", "make_zero", output_path])
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg trim hatasi: {stderr.decode()[-500:]}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg trim hatasi: {result.stderr[-500:]}")
 
 
-async def concat_clips(clip_paths: list[str], output_path: str) -> str:
+def concat_clips(clip_paths: list[str], output_path: str) -> str:
     """Concatenate clips using concat demuxer."""
     list_file = TEMP_DIR / "concat_list.txt"
     with open(list_file, "w", encoding="utf-8") as f:
@@ -47,12 +56,9 @@ async def concat_clips(clip_paths: list[str], output_path: str) -> str:
         FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0",
         "-i", str(list_file), "-c", "copy", output_path
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg concat hatasi: {stderr.decode()[-500:]}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg concat hatasi: {result.stderr[-500:]}")
     return output_path
 
 
@@ -62,150 +68,170 @@ async def export_project(
     subtitles: list[dict],
     output_path: str,
     progress_callback=None,
-    cancel_event: asyncio.Event = None,
+    cancel_event=None,
 ):
     """Full export pipeline: trim + concat + audio mix + subtitles."""
+    import asyncio
     settings = YOUTUBE_EXPORT_SETTINGS
+    temp_files: list[str] = []
 
-    # Step 1: Trim clips
-    trimmed_paths = []
-    for i, clip in enumerate(clips):
-        trimmed = str(TEMP_DIR / f"trimmed_{i}.mp4")
-        if clip.get("in_point", 0) > 0 or clip.get("out_point", -1) > 0:
-            await trim_clip(clip["media_path"], trimmed, clip.get("in_point", 0), clip.get("out_point", -1))
+    try:
+        # Step 1: Trim clips
+        trimmed_paths = []
+        for i, clip in enumerate(clips):
+            media_path = clip["media_path"]
+            if not Path(media_path).exists():
+                raise RuntimeError(f"Klip dosyasi bulunamadi: {media_path}")
+            trimmed = str(TEMP_DIR / f"trimmed_{i}.mp4")
+            if clip.get("in_point", 0) > 0 or clip.get("out_point", -1) > 0:
+                trim_clip(media_path, trimmed, clip.get("in_point", 0), clip.get("out_point", -1))
+                temp_files.append(trimmed)
+            else:
+                trimmed = media_path
+            trimmed_paths.append(trimmed)
+
+        # Step 2: Build FFmpeg command
+        if len(trimmed_paths) == 1 and not audio_tracks and not subtitles:
+            input_file = trimmed_paths[0]
+        elif len(trimmed_paths) > 1:
+            concat_out = str(TEMP_DIR / "concat_out.mp4")
+            concat_clips(trimmed_paths, concat_out)
+            temp_files.append(concat_out)
+            input_file = concat_out
         else:
-            trimmed = clip["media_path"]
-        trimmed_paths.append(trimmed)
+            input_file = trimmed_paths[0]
 
-    # Step 2: Build FFmpeg command
-    if len(trimmed_paths) == 1 and not audio_tracks and not subtitles:
-        input_file = trimmed_paths[0]
-    elif len(trimmed_paths) > 1:
-        concat_out = str(TEMP_DIR / "concat_out.mp4")
-        await concat_clips(trimmed_paths, concat_out)
-        input_file = concat_out
-    else:
-        input_file = trimmed_paths[0]
+        # Build complex filter if needed
+        cmd = [FFMPEG_BIN, "-y", "-i", input_file]
+        filter_complex = []
+        audio_inputs = []
 
-    # Build complex filter if needed
-    cmd = [FFMPEG_BIN, "-y", "-i", input_file]
-    filter_complex = []
-    audio_inputs = []
+        # Audio tracks
+        for j, at in enumerate(audio_tracks):
+            cmd.extend(["-i", at["media_path"]])
+            audio_inputs.append(j + 1)
 
-    # Audio tracks
-    for j, at in enumerate(audio_tracks):
-        cmd.extend(["-i", at["media_path"]])
-        audio_inputs.append(j + 1)
+        # Determine encoder
+        gpu_enc = detect_gpu_encoder()
 
-    # Determine encoder
-    gpu_enc = await detect_gpu_encoder()
+        needs_filter = bool(audio_tracks) or bool(subtitles)
 
-    needs_filter = bool(audio_tracks) or bool(subtitles)
+        if needs_filter:
+            vfilter_parts = []
 
-    if needs_filter:
-        vfilter_parts = []
+            # Subtitle filter
+            if subtitles:
+                ass_path = str(TEMP_DIR / "subs.ass")
+                _generate_ass(subtitles, ass_path)
+                temp_files.append(ass_path)
+                # Escape backslashes and single quotes for the ASS filter path
+                escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
+                vfilter_parts.append(f"ass='{escaped_ass}'")
 
-        # Subtitle filter
-        if subtitles:
-            ass_path = str(TEMP_DIR / "subs.ass")
-            _generate_ass(subtitles, ass_path)
-            vfilter_parts.append(f"ass='{ass_path.replace(os.sep, '/')}'")
+            # Scale to target resolution
+            w, h = settings["resolution"].split("x")
+            vfilter_parts.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease")
+            vfilter_parts.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
+            vfilter_parts.append(f"format={settings['pixel_format']}")
 
-        # Scale to target resolution
-        w, h = settings["resolution"].split("x")
-        vfilter_parts.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease")
-        vfilter_parts.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
-        vfilter_parts.append(f"format={settings['pixel_format']}")
+            cmd.extend(["-vf", ",".join(vfilter_parts)])
 
-        cmd.extend(["-vf", ",".join(vfilter_parts)])
+            # Audio mixing
+            if audio_tracks:
+                audio_filter = f"[0:a]volume=1.0[a0];"
+                for j, at in enumerate(audio_tracks):
+                    vol = at.get("volume", 1.0)
+                    fade_in = at.get("fade_in", 0)
+                    fade_out = at.get("fade_out", 0)
+                    af = f"[{j+1}:a]volume={vol}"
+                    if fade_in > 0:
+                        af += f",afade=t=in:d={fade_in}"
+                    if fade_out > 0:
+                        af += f",afade=t=out:d={fade_out}"
+                    af += f"[a{j+1}];"
+                    audio_filter += af
+                inputs = "".join(f"[a{k}]" for k in range(len(audio_tracks) + 1))
+                audio_filter += f"{inputs}amix=inputs={len(audio_tracks)+1}:duration=longest[aout]"
+                cmd.extend(["-filter_complex", audio_filter, "-map", "0:v", "-map", "[aout]"])
+            else:
+                cmd.extend(["-map", "0:v", "-map", "0:a?"])
 
-        # Audio mixing
-        if audio_tracks:
-            audio_filter = f"[0:a]volume=1.0[a0];"
-            for j, at in enumerate(audio_tracks):
-                vol = at.get("volume", 1.0)
-                fade_in = at.get("fade_in", 0)
-                fade_out = at.get("fade_out", 0)
-                af = f"[{j+1}:a]volume={vol}"
-                if fade_in > 0:
-                    af += f",afade=t=in:d={fade_in}"
-                if fade_out > 0:
-                    af += f",afade=t=out:d={fade_out}"
-                af += f"[a{j+1}];"
-                audio_filter += af
-            inputs = "".join(f"[a{k}]" for k in range(len(audio_tracks) + 1))
-            audio_filter += f"{inputs}amix=inputs={len(audio_tracks)+1}:duration=longest[aout]"
-            cmd.extend(["-filter_complex", audio_filter, "-map", "0:v", "-map", "[aout]"])
+            # Encoder settings
+            encoder = gpu_enc or settings["video_codec"]
+            cmd.extend([
+                "-c:v", encoder,
+                "-b:v", settings["video_bitrate"],
+                "-c:a", settings["audio_codec"],
+                "-b:a", settings["audio_bitrate"],
+                "-ar", str(settings["audio_sample_rate"]),
+            ])
+            if encoder == "libx264":
+                cmd.extend([
+                    "-preset", settings["preset"],
+                    "-profile:v", settings["profile"],
+                    "-level", settings["level"],
+                ])
+            cmd.extend(["-g", str(settings["keyint"]), "-movflags", "+faststart"])
         else:
-            cmd.extend(["-map", "0:v", "-map", "0:a?"])
-
-        # Encoder settings
-        encoder = gpu_enc or settings["video_codec"]
-        cmd.extend([
-            "-c:v", encoder,
-            "-b:v", settings["video_bitrate"],
-            "-c:a", settings["audio_codec"],
-            "-b:a", settings["audio_bitrate"],
-            "-ar", str(settings["audio_sample_rate"]),
-        ])
-        if encoder == "libx264":
+            # Simple re-encode to YouTube specs
+            w, h = settings["resolution"].split("x")
+            encoder = gpu_enc or settings["video_codec"]
             cmd.extend([
-                "-preset", settings["preset"],
-                "-profile:v", settings["profile"],
-                "-level", settings["level"],
+                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format={settings['pixel_format']}",
+                "-c:v", encoder,
+                "-b:v", settings["video_bitrate"],
+                "-c:a", settings["audio_codec"],
+                "-b:a", settings["audio_bitrate"],
+                "-ar", str(settings["audio_sample_rate"]),
+                "-g", str(settings["keyint"]),
+                "-movflags", "+faststart",
             ])
-        cmd.extend(["-g", str(settings["keyint"]), "-movflags", "+faststart"])
-    else:
-        # Simple re-encode to YouTube specs
-        w, h = settings["resolution"].split("x")
-        encoder = gpu_enc or settings["video_codec"]
-        cmd.extend([
-            "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format={settings['pixel_format']}",
-            "-c:v", encoder,
-            "-b:v", settings["video_bitrate"],
-            "-c:a", settings["audio_codec"],
-            "-b:a", settings["audio_bitrate"],
-            "-ar", str(settings["audio_sample_rate"]),
-            "-g", str(settings["keyint"]),
-            "-movflags", "+faststart",
-        ])
-        if encoder == "libx264":
-            cmd.extend([
-                "-preset", settings["preset"],
-                "-profile:v", settings["profile"],
-                "-level", settings["level"],
-            ])
+            if encoder == "libx264":
+                cmd.extend([
+                    "-preset", settings["preset"],
+                    "-profile:v", settings["profile"],
+                    "-level", settings["level"],
+                ])
 
-    cmd.append(output_path)
+        cmd.append(output_path)
 
-    # Run with progress tracking
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
+        # Run with progress tracking using Popen for real-time output
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, encoding="utf-8", errors="replace"
+        )
 
-    stderr_data = b""
-    while True:
-        if cancel_event and cancel_event.is_set():
-            proc.kill()
-            raise RuntimeError("Export iptal edildi")
-        chunk = await proc.stderr.read(1024)
-        if not chunk:
-            break
-        stderr_data += chunk
-        text = chunk.decode("utf-8", errors="replace")
-        time_match = re.findall(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})", text)
-        if time_match and progress_callback:
-            h, m, s, cs = time_match[-1]
-            current = int(h) * 3600 + int(m) * 60 + int(s) + int(cs) / 100
-            await progress_callback(current)
+        while True:
+            if cancel_event and cancel_event.is_set():
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("Export iptal edildi")
+            line = proc.stderr.readline()
+            if not line and proc.poll() is not None:
+                break
+            time_match = re.findall(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})", line)
+            if time_match and progress_callback:
+                h_val, m_val, s_val, cs_val = time_match[-1]
+                current = int(h_val) * 3600 + int(m_val) * 60 + int(s_val) + int(cs_val) / 100
+                await progress_callback(current)
+            # Yield control to event loop
+            await asyncio.sleep(0)
 
-    await proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Export hatasi: {stderr_data.decode()[-500:]}")
-    return output_path
+        if proc.returncode != 0:
+            stderr_remaining = proc.stderr.read()
+            raise RuntimeError(f"Export hatasi: {stderr_remaining[-500:]}")
+        return output_path
+
+    finally:
+        # Clean up temp files
+        for tf in temp_files:
+            try:
+                Path(tf).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
-async def create_slideshow(
+def create_slideshow(
     images: list[str],
     output_path: str,
     duration_per_image: float = 5.0,
@@ -251,12 +277,31 @@ async def create_slideshow(
         output_path
     ])
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Slayt gosterisi hatasi: {stderr.decode()[-500:]}")
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise RuntimeError(f"Slayt gosterisi hatasi: {result.stderr[-500:]}")
+
+    # Add silent audio track for browser compatibility
+    temp_out = output_path + ".tmp.mp4"
+    import shutil
+    shutil.move(output_path, temp_out)
+    try:
+        add_audio_cmd = [
+            FFMPEG_BIN, "-y",
+            "-i", temp_out,
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+            "-shortest", "-movflags", "+faststart",
+            output_path
+        ]
+        result2 = subprocess.run(add_audio_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if result2.returncode != 0:
+            raise RuntimeError(f"Ses ekleme hatasi: {result2.stderr[-500:]}")
+    finally:
+        try:
+            Path(temp_out).unlink(missing_ok=True)
+        except Exception:
+            pass
     return output_path
 
 

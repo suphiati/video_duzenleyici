@@ -14,6 +14,11 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const video = () => $('videoPlayer');
 
+// ─── Path normalization ───
+function normPath(p) {
+    return p.replace(/\//g, '\\');
+}
+
 // ─── Toast ───
 function toast(msg, type = '') {
     const t = document.createElement('div');
@@ -37,8 +42,9 @@ app.switchTab = (tab) => {
 // ─── File Browser ───
 app.browsePath = async (path) => {
     try {
-        const data = await api.browse(path);
+        const data = await api.browse(normPath(path));
         state.currentPath = data.path;
+        state.parentPath = data.parent || null;
         $('pathInput').value = data.path;
         renderFileList(data.items);
     } catch (e) {
@@ -47,12 +53,18 @@ app.browsePath = async (path) => {
 };
 
 app.goUp = () => {
-    const parts = state.currentPath.replace(/\\/g, '/').split('/').filter(Boolean);
-    if (parts.length > 1) {
-        parts.pop();
-        app.browsePath(parts.join('/'));
+    if (state.parentPath) {
+        app.browsePath(state.parentPath);
     } else {
-        app.browsePath(parts[0] + '/');
+        // Fallback: compute parent from currentPath
+        const normalized = normPath(state.currentPath);
+        const parts = normalized.split('\\').filter(Boolean);
+        if (parts.length > 1) {
+            parts.pop();
+            app.browsePath(parts.join('\\'));
+        } else {
+            app.browsePath(parts[0] + '\\');
+        }
     }
 };
 
@@ -75,19 +87,23 @@ function renderFileList(items) {
     }).join('');
 }
 
-// Event delegation for file list
+// Event delegation for file list - only handle clicks inside fileBrowser
 document.addEventListener('click', (e) => {
+    const fileBrowser = $('fileBrowser');
+    if (!fileBrowser || !fileBrowser.contains(e.target)) return;
     const fi = e.target.closest('.file-item[data-idx]');
     if (fi && state.fileItems) {
         const item = state.fileItems[parseInt(fi.dataset.idx)];
-        if (item) app.fileClick(item.path, item.type);
+        if (item) app.fileClick(normPath(item.path), item.type);
     }
 });
 document.addEventListener('dblclick', (e) => {
+    const fileBrowser = $('fileBrowser');
+    if (!fileBrowser || !fileBrowser.contains(e.target)) return;
     const fi = e.target.closest('.file-item[data-idx]');
     if (fi && state.fileItems) {
         const item = state.fileItems[parseInt(fi.dataset.idx)];
-        if (item) app.fileDblClick(item.path, item.type);
+        if (item) app.fileDblClick(normPath(item.path), item.type);
     }
 });
 
@@ -97,17 +113,21 @@ app.fileClick = async (path, type) => {
         return;
     }
     // Import and preview
-    await api.importMedia([path]);
-    await refreshMediaLibrary();
-    app.previewMedia(path, type);
-    toast('Medya kutuphanesine eklendi', 'success');
+    try {
+        await api.importMedia([normPath(path)]);
+        await refreshMediaLibrary();
+        app.previewMedia(normPath(path), type);
+        toast('Medya kutuphanesine eklendi', 'success');
+    } catch (e) {
+        toast(e.message, 'error');
+    }
 };
 
 app.fileDblClick = (path, type) => {
     if (type === 'folder') {
         app.browsePath(path);
     } else {
-        app.addToTimeline(path);
+        app.addToTimeline(normPath(path));
     }
 };
 
@@ -135,12 +155,15 @@ async function refreshMediaLibrary() {
             </div>
         `).join('');
     } catch (e) {
-        console.error(e);
+        toast('Medya kutuphanesi yuklenemedi: ' + e.message, 'error');
     }
 }
 
-// Event delegation for media library
+// Event delegation for media library - only handle clicks inside mediaLibrary panel
 document.addEventListener('click', (e) => {
+    const mediaPanel = $('mediaLibrary');
+    if (!mediaPanel || !mediaPanel.contains(e.target)) return;
+
     const actionBtn = e.target.closest('[data-action]');
     if (actionBtn) {
         const mi = actionBtn.closest('.media-item[data-midx]');
@@ -160,8 +183,12 @@ document.addEventListener('click', (e) => {
 });
 
 app.removeFromLibrary = async (path) => {
-    await api.removeMedia(path);
-    refreshMediaLibrary();
+    try {
+        await api.removeMedia(path);
+        refreshMediaLibrary();
+    } catch (e) {
+        toast('Medya silinemedi: ' + e.message, 'error');
+    }
 };
 
 // ─── Video Preview ───
@@ -173,10 +200,24 @@ app.previewMedia = (path, type) => {
     const placeholder = $('videoPlaceholder');
 
     if (type === 'video' || type === 'audio') {
-        v.src = api.streamUrl(path);
         v.style.display = 'block';
         placeholder.style.display = 'none';
+        // Set src first, then load
+        v.src = api.streamUrl(path);
         v.load();
+
+        // Handle video error events
+        const onError = () => {
+            toast('Medya yuklenemedi', 'error');
+            v.removeEventListener('error', onError);
+        };
+        v.addEventListener('error', onError, { once: true });
+
+        // Update UI when video data is ready
+        v.addEventListener('loadeddata', () => {
+            $('timeDisplay').textContent = `00:00 / ${formatTime(v.duration || 0)}`;
+            $('seekBar').value = 0;
+        }, { once: true });
     } else if (type === 'image') {
         v.style.display = 'none';
         placeholder.style.display = 'block';
@@ -198,7 +239,7 @@ async function showMediaInfo(path) {
         rows.push(`Dosya: ${formatSize(info.file_size)}`);
         el.innerHTML = rows.map(r => `<div style="font-size:12px;margin-bottom:3px">${r}</div>`).join('');
     } catch (e) {
-        console.error(e);
+        toast('Medya bilgisi alinamadi: ' + e.message, 'error');
     }
 }
 
@@ -243,10 +284,10 @@ app.addSelectedToTimeline = () => {
 app.addToTimeline = async (path) => {
     if (!state.project) await app.newProject();
     try {
-        const info = await api.mediaInfo(path);
+        const info = await api.mediaInfo(normPath(path));
         if (info.media_type === 'audio') {
             const data = await api.addAudio(state.project.id, {
-                media_path: path,
+                media_path: normPath(path),
                 volume: 1.0,
                 fade_in: 0,
                 fade_out: 0,
@@ -256,7 +297,7 @@ app.addToTimeline = async (path) => {
             toast('Ses eklendi', 'success');
         } else {
             const clip = {
-                media_path: path,
+                media_path: normPath(path),
                 in_point: state.inPoint,
                 out_point: state.outPoint,
             };
@@ -325,10 +366,14 @@ function initSortable(el) {
     el._sortable = new Sortable(el, {
         animation: 150,
         onEnd: async (evt) => {
-            const ids = [...el.querySelectorAll('.clip-block')].map(e => e.dataset.clipId);
-            const data = await api.reorderClips(state.project.id, ids);
-            state.project = data;
-            renderTimeline();
+            try {
+                const ids = [...el.querySelectorAll('.clip-block')].map(e => e.dataset.clipId);
+                const data = await api.reorderClips(state.project.id, ids);
+                state.project = data;
+                renderTimeline();
+            } catch (e) {
+                toast('Klip siralama hatasi: ' + e.message, 'error');
+            }
         }
     });
 }
@@ -367,8 +412,12 @@ app.updateClipProp = async () => {
     if (clip) {
         clip.in_point = parseFloat($('clipInPoint').value) || 0;
         clip.out_point = parseFloat($('clipOutPoint').value) || -1;
-        const data = await api.updateClip(state.project.id, clip.id, clip);
-        state.project = data;
+        try {
+            const data = await api.updateClip(state.project.id, clip.id, clip);
+            state.project = data;
+        } catch (e) {
+            toast('Klip guncellenemedi: ' + e.message, 'error');
+        }
     }
 };
 
@@ -380,26 +429,38 @@ app.updateAudioProp = async () => {
         track.fade_in = parseFloat($('audioFadeIn').value) || 0;
         track.fade_out = parseFloat($('audioFadeOut').value) || 0;
         $('audioVolumeLabel').textContent = Math.round(track.volume * 100) + '%';
-        const data = await api.updateAudio(state.project.id, track.id, track);
-        state.project = data;
-        renderTimeline();
+        try {
+            const data = await api.updateAudio(state.project.id, track.id, track);
+            state.project = data;
+            renderTimeline();
+        } catch (e) {
+            toast('Ses guncellenemedi: ' + e.message, 'error');
+        }
     }
 };
 
 app.removeClip = async (clipId) => {
-    const data = await api.removeClip(state.project.id, clipId);
-    state.project = data;
-    state.selectedClipId = null;
-    $('clipPropsSection').style.display = 'none';
-    renderTimeline();
+    try {
+        const data = await api.removeClip(state.project.id, clipId);
+        state.project = data;
+        state.selectedClipId = null;
+        $('clipPropsSection').style.display = 'none';
+        renderTimeline();
+    } catch (e) {
+        toast('Klip silinemedi: ' + e.message, 'error');
+    }
 };
 
 app.removeAudio = async (trackId) => {
-    const data = await api.removeAudio(state.project.id, trackId);
-    state.project = data;
-    state.selectedAudioId = null;
-    $('audioPropsSection').style.display = 'none';
-    renderTimeline();
+    try {
+        const data = await api.removeAudio(state.project.id, trackId);
+        state.project = data;
+        state.selectedAudioId = null;
+        $('audioPropsSection').style.display = 'none';
+        renderTimeline();
+    } catch (e) {
+        toast('Ses silinemedi: ' + e.message, 'error');
+    }
 };
 
 // ─── Music Dialog ───
@@ -423,10 +484,14 @@ app.addSubtitleAtCurrent = async () => {
         color: '#FFFFFF',
         position: 'bottom',
     };
-    const data = await api.addSubtitle(state.project.id, entry);
-    state.project = data;
-    renderTimeline();
-    toast('Altyazi eklendi', 'success');
+    try {
+        const data = await api.addSubtitle(state.project.id, entry);
+        state.project = data;
+        renderTimeline();
+        toast('Altyazi eklendi', 'success');
+    } catch (e) {
+        toast('Altyazi eklenemedi: ' + e.message, 'error');
+    }
 };
 
 function renderSubtitleList() {
@@ -443,6 +508,8 @@ function renderSubtitleList() {
                 onchange="app.editSubtitle('${s.id}','end_time',this.value)" title="Bitis">
             <input type="text" value="${escAttr(s.text)}"
                 onchange="app.editSubtitle('${s.id}','text',this.value)" title="Metin">
+            <input type="color" value="${s.color || '#FFFFFF'}"
+                onchange="app.editSubtitle('${s.id}','color',this.value)" title="Renk">
             <button onclick="app.deleteSubtitle('${s.id}')" style="background:var(--danger)">x</button>
         </div>
     `).join('');
@@ -453,15 +520,23 @@ app.editSubtitle = async (id, field, value) => {
     if (!sub) return;
     if (field === 'start_time' || field === 'end_time') value = parseFloat(value);
     sub[field] = value;
-    const data = await api.updateSubtitle(state.project.id, id, sub);
-    state.project = data;
-    renderTimeline();
+    try {
+        const data = await api.updateSubtitle(state.project.id, id, sub);
+        state.project = data;
+        renderTimeline();
+    } catch (e) {
+        toast('Altyazi guncellenemedi: ' + e.message, 'error');
+    }
 };
 
 app.deleteSubtitle = async (id) => {
-    const data = await api.removeSubtitle(state.project.id, id);
-    state.project = data;
-    renderTimeline();
+    try {
+        const data = await api.removeSubtitle(state.project.id, id);
+        state.project = data;
+        renderTimeline();
+    } catch (e) {
+        toast('Altyazi silinemedi: ' + e.message, 'error');
+    }
 };
 
 app.selectSubtitle = (id) => {
@@ -473,48 +548,65 @@ app.selectSubtitle = (id) => {
 
 // ─── Project Management ───
 app.newProject = async () => {
-    const data = await api.createProject('Yeni Proje');
-    state.project = data;
-    $('projectName').value = data.name;
-    renderTimeline();
-    startAutoSave();
+    try {
+        const data = await api.createProject('Yeni Proje');
+        state.project = data;
+        $('projectName').value = data.name;
+        renderTimeline();
+        startAutoSave();
+    } catch (e) {
+        toast('Proje olusturulamadi: ' + e.message, 'error');
+    }
 };
 
 app.saveProject = async () => {
     if (!state.project) return;
-    state.project.name = $('projectName').value;
-    await api.saveProject(state.project.id, state.project);
-    toast('Proje kaydedildi', 'success');
+    try {
+        state.project.name = $('projectName').value;
+        await api.saveProject(state.project.id, state.project);
+        toast('Proje kaydedildi', 'success');
+    } catch (e) {
+        toast('Proje kaydedilemedi: ' + e.message, 'error');
+    }
 };
 
 app.showProjectList = async () => {
-    const data = await api.listProjects();
-    const html = data.projects.length
-        ? data.projects.map(p => `
-            <div class="file-item" style="cursor:pointer" onclick="app.loadProject('${p.id}')">
-                <span class="icon">\uD83D\uDCC4</span>
-                <span class="name">${escHtml(p.name)} (${p.clip_count} klip)</span>
-                <span class="size">${p.updated_at ? new Date(p.updated_at).toLocaleDateString('tr') : ''}</span>
-            </div>`).join('')
-        : '<p style="padding:12px;color:var(--text-muted)">Kayitli proje yok</p>';
+    try {
+        const data = await api.listProjects();
+        const html = data.projects.length
+            ? data.projects.map(p => `
+                <div class="file-item" style="cursor:pointer" onclick="app.loadProject('${p.id}')">
+                    <span class="icon">\uD83D\uDCC4</span>
+                    <span class="name">${escHtml(p.name)} (${p.clip_count} klip)</span>
+                    <span class="size">${p.updated_at ? new Date(p.updated_at).toLocaleDateString('tr') : ''}</span>
+                </div>`).join('')
+            : '<p style="padding:12px;color:var(--text-muted)">Kayitli proje yok</p>';
 
-    showModal('Proje Ac', html);
+        showModal('Proje Ac', html);
+    } catch (e) {
+        toast('Proje listesi alinamadi: ' + e.message, 'error');
+    }
 };
 
 app.loadProject = async (id) => {
-    const data = await api.getProject(id);
-    state.project = data;
-    $('projectName').value = data.name;
-    renderTimeline();
-    closeModal();
-    startAutoSave();
-    toast('Proje yuklendi', 'success');
+    try {
+        const data = await api.getProject(id);
+        state.project = data;
+        $('projectName').value = data.name;
+        renderTimeline();
+        closeModal();
+        startAutoSave();
+        toast('Proje yuklendi', 'success');
+    } catch (e) {
+        toast('Proje yuklenemedi: ' + e.message, 'error');
+    }
 };
 
 function startAutoSave() {
     if (state.autoSaveTimer) clearInterval(state.autoSaveTimer);
     state.autoSaveTimer = setInterval(async () => {
-        if (state.project) {
+        // Only auto-save if project exists and has been created
+        if (state.project && state.project.id) {
             state.project.name = $('projectName').value;
             await api.saveProject(state.project.id, state.project).catch(() => {});
         }
@@ -528,6 +620,13 @@ app.startExport = () => {
         return;
     }
 
+    // Disable export button during export
+    const exportBtn = $('exportBtn');
+    if (exportBtn) {
+        exportBtn.disabled = true;
+        exportBtn.textContent = 'Yukleniyor...';
+    }
+
     const html = `
         <div class="export-progress">
             <div class="progress-bar"><div class="fill" id="exportFill" style="width:0%"></div></div>
@@ -539,6 +638,13 @@ app.startExport = () => {
     ]);
 
     const ws = new WebSocket(api.exportWsUrl(state.project.id));
+
+    const enableExportBtn = () => {
+        if (exportBtn) {
+            exportBtn.disabled = false;
+            exportBtn.textContent = 'Disa Aktar';
+        }
+    };
 
     ws.onmessage = (e) => {
         const msg = JSON.parse(e.data);
@@ -555,19 +661,29 @@ app.startExport = () => {
                 <p>Boyut: <b>${formatSize(msg.size)}</b></p>
             `, [{ text: 'Tamam', class: 'primary', onclick: 'closeModal()' }]);
             toast('Export tamamlandi!', 'success');
+            enableExportBtn();
         } else if (msg.type === 'error') {
             showModal('Hata', `<p style="color:var(--danger)">${escHtml(msg.message)}</p>`,
                 [{ text: 'Kapat', class: '', onclick: 'closeModal()' }]);
+            enableExportBtn();
         }
     };
 
-    ws.onerror = () => toast('WebSocket baglanti hatasi', 'error');
+    ws.onerror = () => {
+        toast('WebSocket baglanti hatasi', 'error');
+        enableExportBtn();
+    };
+
+    ws.onclose = () => {
+        enableExportBtn();
+    };
 
     const cancelBtn = document.getElementById('exportCancelBtn');
     if (cancelBtn) {
         cancelBtn.onclick = () => {
             ws.send(JSON.stringify({ action: 'cancel' }));
             closeModal();
+            enableExportBtn();
         };
     }
 };
@@ -606,7 +722,13 @@ app.showSlideshowDialog = () => {
 };
 
 app.createSlideshow = async () => {
-    const media = await api.listMedia();
+    let media;
+    try {
+        media = await api.listMedia();
+    } catch (e) {
+        toast('Medya listesi alinamadi: ' + e.message, 'error');
+        return;
+    }
     const images = media.media.filter(m => m.media_type === 'image').map(m => m.path);
     if (!images.length) {
         toast('Kutuphanede resim yok. Once resim ekleyin.', 'error');
@@ -620,6 +742,13 @@ app.createSlideshow = async () => {
     closeModal();
     toast('Slayt gosterisi olusturuluyor...', '');
 
+    // Disable slideshow button during creation
+    const slideshowBtn = $('slideshowBtn');
+    if (slideshowBtn) {
+        slideshowBtn.disabled = true;
+        slideshowBtn.textContent = 'Yukleniyor...';
+    }
+
     try {
         const result = await api.createSlideshow({
             images,
@@ -630,9 +759,14 @@ app.createSlideshow = async () => {
         toast('Slayt gosterisi olusturuldu!', 'success');
         // Import the created slideshow
         await api.importMedia([result.output]);
-        refreshMediaLibrary();
+        await refreshMediaLibrary();
     } catch (e) {
-        toast(e.message, 'error');
+        toast('Slayt gosterisi olusturulamadi: ' + e.message, 'error');
+    } finally {
+        if (slideshowBtn) {
+            slideshowBtn.disabled = false;
+            slideshowBtn.textContent = 'Slayt Gosterisi';
+        }
     }
 };
 

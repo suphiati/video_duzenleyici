@@ -8,6 +8,7 @@ THUMBNAILS_DIR = DATA_DIR / "thumbnails"
 EXPORTS_DIR = DATA_DIR / "exports"
 TEMP_DIR = DATA_DIR / "temp"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+MEDIA_LIBRARY_FILE = DATA_DIR / "media_library.json"
 
 for d in [PROJECTS_DIR, THUMBNAILS_DIR, EXPORTS_DIR, TEMP_DIR]:
     d.mkdir(parents=True, exist_ok=True)

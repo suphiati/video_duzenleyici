@@ -1,23 +1,54 @@
+import json
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response, FileResponse
+from fastapi import APIRouter, HTTPException
+from starlette.responses import FileResponse
 
-from app.config import VIDEO_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS
+from app.config import VIDEO_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, MEDIA_LIBRARY_FILE
 from app.models.media import BrowseRequest, ImportRequest, MediaInfo
 from app.services.ffprobe_service import probe_file
 from app.services.thumbnail_service import get_thumbnail
 
 router = APIRouter()
 
-# In-memory media library for the session
+# ---------------------------------------------------------------------------
+# Persistent media library (JSON on disk)
+# ---------------------------------------------------------------------------
 _media_library: dict[str, MediaInfo] = {}
 
 
+def _load_library():
+    """Load media library from disk."""
+    global _media_library
+    if MEDIA_LIBRARY_FILE.exists():
+        try:
+            raw = json.loads(MEDIA_LIBRARY_FILE.read_text(encoding="utf-8"))
+            for key, val in raw.items():
+                norm_key = os.path.normpath(key)
+                _media_library[norm_key] = MediaInfo(**val)
+        except Exception:
+            _media_library = {}
+
+
+def _save_library():
+    """Persist media library to disk."""
+    MEDIA_LIBRARY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {k: v.model_dump() for k, v in _media_library.items()}
+    MEDIA_LIBRARY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# Load on module import
+_load_library()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
 @router.post("/browse")
 async def browse_files(req: BrowseRequest):
-    p = Path(req.path)
+    p = Path(os.path.normpath(req.path))
     if not p.exists():
         raise HTTPException(404, "Klasor bulunamadi")
     if not p.is_dir():
@@ -54,15 +85,21 @@ async def browse_files(req: BrowseRequest):
 async def import_media(req: ImportRequest):
     results = []
     for file_path in req.paths:
-        p = Path(file_path)
+        norm_path = os.path.normpath(file_path)
+        p = Path(norm_path)
         if not p.exists():
+            results.append({"path": norm_path, "error": "Dosya bulunamadi"})
+            continue
+        if not p.is_file():
+            results.append({"path": norm_path, "error": "Bu bir dosya degil"})
             continue
         try:
-            info = await probe_file(file_path)
-            _media_library[file_path] = info
+            info = await probe_file(norm_path)
+            _media_library[norm_path] = info
             results.append(info.model_dump())
         except Exception as e:
-            results.append({"path": file_path, "error": str(e)})
+            results.append({"path": norm_path, "error": f"{type(e).__name__}: {e}"})
+    _save_library()
     return {"imported": results}
 
 
@@ -73,16 +110,22 @@ async def list_media():
 
 @router.delete("/remove")
 async def remove_media(path: str):
-    if path in _media_library:
-        del _media_library[path]
+    norm_path = os.path.normpath(path)
+    if norm_path in _media_library:
+        del _media_library[norm_path]
+        _save_library()
         return {"ok": True}
     raise HTTPException(404, "Medya bulunamadi")
 
 
 @router.get("/info")
 async def get_info(path: str):
+    norm_path = os.path.normpath(path)
+    p = Path(norm_path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, "Dosya bulunamadi")
     try:
-        info = await probe_file(path)
+        info = await probe_file(norm_path)
         return info.model_dump()
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -90,22 +133,22 @@ async def get_info(path: str):
 
 @router.get("/thumbnail")
 async def get_thumb(path: str):
-    thumb = await get_thumbnail(path)
+    norm_path = os.path.normpath(path)
+    thumb = await get_thumbnail(norm_path)
     if thumb and thumb.exists():
         return FileResponse(str(thumb), media_type="image/jpeg")
     raise HTTPException(404, "Kucuk resim olusturulamadi")
 
 
 @router.get("/stream")
-async def stream_media(request: Request, path: str):
-    p = Path(path)
+async def stream_media(path: str):
+    norm_path = os.path.normpath(path)
+    p = Path(norm_path)
     if not p.exists():
         raise HTTPException(404, "Dosya bulunamadi")
+    if not p.is_file():
+        raise HTTPException(400, "Bu bir dosya degil")
 
-    file_size = p.stat().st_size
-    range_header = request.headers.get("range")
-
-    content_type = "video/mp4"
     ext = p.suffix.lower()
     ct_map = {
         ".mp4": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
@@ -114,31 +157,7 @@ async def stream_media(request: Request, path: str):
         ".aac": "audio/aac", ".m4a": "audio/mp4", ".flac": "audio/flac",
     }
     content_type = ct_map.get(ext, "application/octet-stream")
-
-    if range_header:
-        range_val = range_header.replace("bytes=", "")
-        parts = range_val.split("-")
-        start = int(parts[0])
-        end = int(parts[1]) if parts[1] else min(start + 5 * 1024 * 1024, file_size - 1)
-        end = min(end, file_size - 1)
-        length = end - start + 1
-
-        with open(p, "rb") as f:
-            f.seek(start)
-            data = f.read(length)
-
-        return Response(
-            content=data,
-            status_code=206,
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(length),
-                "Content-Type": content_type,
-            },
-        )
-
-    return FileResponse(str(p), media_type=content_type, headers={"Accept-Ranges": "bytes"})
+    return FileResponse(str(p), media_type=content_type)
 
 
 @router.get("/drives")

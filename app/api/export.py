@@ -37,12 +37,17 @@ async def export_ws(websocket: WebSocket, project_id: str):
     total_duration = 0
     for clip in project.clips:
         try:
+            clip_path = Path(clip.media_path)
+            if not clip_path.exists() or not clip_path.is_file():
+                continue
             info = await probe_file(clip.media_path)
             clip_dur = info.duration
             if clip.in_point > 0:
                 clip_dur -= clip.in_point
             if clip.out_point > 0:
                 clip_dur = clip.out_point - clip.in_point
+            elif clip.in_point > 0:
+                clip_dur = info.duration - clip.in_point
             total_duration += clip_dur
         except Exception:
             pass
@@ -79,7 +84,11 @@ async def export_ws(websocket: WebSocket, project_id: str):
 
         cancel_task.cancel()
 
-        file_size = Path(output_path).stat().st_size
+        out_file = Path(output_path)
+        if not out_file.exists():
+            raise RuntimeError("Export dosyasi olusturulamadi")
+
+        file_size = out_file.stat().st_size
         await websocket.send_json({
             "type": "completed",
             "output": output_path,
@@ -87,8 +96,18 @@ async def export_ws(websocket: WebSocket, project_id: str):
         })
     except RuntimeError as e:
         await websocket.send_json({"type": "error", "message": str(e)})
+        # Clean up failed export file
+        try:
+            Path(output_path).unlink(missing_ok=True)
+        except Exception:
+            pass
     except Exception as e:
         await websocket.send_json({"type": "error", "message": f"Beklenmeyen hata: {str(e)}"})
+        # Clean up failed export file
+        try:
+            Path(output_path).unlink(missing_ok=True)
+        except Exception:
+            pass
     finally:
         _active_exports.pop(project_id, None)
         try:

@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from app.config import STATIC_DIR
+from app.config import STATIC_DIR, DATA_DIR
 from app.api import media, projects, timeline, subtitles, export, slideshow
 
 app = FastAPI(title="Video Duzenleyici")

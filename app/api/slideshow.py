@@ -25,7 +25,7 @@ async def create_slideshow_endpoint(req: SlideshowRequest):
     output_path = str(EXPORTS_DIR / f"{name}.mp4")
 
     try:
-        await create_slideshow(
+        create_slideshow(
             images=req.images,
             output_path=output_path,
             duration_per_image=req.duration_per_image,

@@ -1,5 +1,5 @@
-import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 from app.config import FFPROBE_BIN, VIDEO_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS
@@ -8,10 +8,12 @@ from app.models.media import MediaInfo
 
 async def probe_file(file_path: str) -> MediaInfo:
     path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Dosya bulunamadi: {file_path}")
     ext = path.suffix.lower()
 
     if ext in IMAGE_EXTENSIONS:
-        return await _probe_image(path)
+        return _probe_image(path)
 
     cmd = [
         FFPROBE_BIN, "-v", "quiet",
@@ -19,11 +21,14 @@ async def probe_file(file_path: str) -> MediaInfo:
         "-show_format", "-show_streams",
         str(path)
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, _ = await proc.communicate()
-    data = json.loads(stdout.decode("utf-8", errors="replace"))
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    stdout_str = result.stdout.strip()
+    if not stdout_str:
+        raise RuntimeError(f"ffprobe bos cikti verdi: {result.stderr[:300]}")
+    try:
+        data = json.loads(stdout_str)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"ffprobe JSON parse hatasi: {e}")
 
     info = MediaInfo(
         path=str(path),
@@ -54,7 +59,7 @@ async def probe_file(file_path: str) -> MediaInfo:
     return info
 
 
-async def _probe_image(path: Path) -> MediaInfo:
+def _probe_image(path: Path) -> MediaInfo:
     from PIL import Image
     img = Image.open(path)
     w, h = img.size

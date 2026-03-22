@@ -1,4 +1,4 @@
-import asyncio
+import subprocess
 from pathlib import Path
 import hashlib
 
@@ -17,11 +17,11 @@ async def get_thumbnail(file_path: str) -> Path | None:
 
     ext = Path(file_path).suffix.lower()
     if ext in IMAGE_EXTENSIONS:
-        return await _image_thumbnail(file_path, thumb)
-    return await _video_thumbnail(file_path, thumb)
+        return _image_thumbnail(file_path, thumb)
+    return _video_thumbnail(file_path, thumb)
 
 
-async def _video_thumbnail(file_path: str, thumb: Path) -> Path | None:
+def _video_thumbnail(file_path: str, thumb: Path) -> Path | None:
     cmd = [
         FFMPEG_BIN, "-y", "-i", file_path,
         "-ss", "00:00:02", "-vframes", "1",
@@ -29,14 +29,11 @@ async def _video_thumbnail(file_path: str, thumb: Path) -> Path | None:
         "-q:v", "5",
         str(thumb)
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    await proc.communicate()
+    subprocess.run(cmd, capture_output=True)
     return thumb if thumb.exists() else None
 
 
-async def _image_thumbnail(file_path: str, thumb: Path) -> Path | None:
+def _image_thumbnail(file_path: str, thumb: Path) -> Path | None:
     from PIL import Image
     img = Image.open(file_path)
     img.thumbnail((320, 320))
