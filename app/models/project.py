@@ -9,6 +9,10 @@ class Clip(BaseModel):
     in_point: float = 0.0
     out_point: float = -1.0  # -1 means end of file
     order: int = 0
+    # Per-clip colour correction (applied at export via ffmpeg eq=)
+    brightness: float = 0.0   # -1.0 .. 1.0  (0 = unchanged)
+    contrast: float = 1.0     #  0.0 .. 2.0  (1 = unchanged)
+    saturation: float = 1.0   #  0.0 .. 3.0  (1 = unchanged)
 
 
 class AudioTrack(BaseModel):

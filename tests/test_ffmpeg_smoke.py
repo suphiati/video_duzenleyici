@@ -91,6 +91,21 @@ def test_mix_with_music(media):
 
 
 @skip_no_ffmpeg
+async def test_export_project_with_color_effect(media, tmp_path):
+    """The any-effects path re-encodes the clip with an eq filter applied."""
+    from app.services.ffmpeg_service import export_project
+
+    clips = [{
+        "media_path": media["clips"][0], "in_point": 0.0, "out_point": 1.5,
+        "brightness": 0.1, "contrast": 1.2, "saturation": 1.1,
+    }]
+    out = str(tmp_path / "export_fx.mp4")
+    await export_project(clips=clips, audio_tracks=[], subtitles=[], output_path=out)
+    assert Path(out).exists()
+    assert ffmpeg_service._get_duration(out) > 0
+
+
+@skip_no_ffmpeg
 async def test_create_batch_video_parallel_orders_and_concats(media, tmp_path):
     """End-to-end: parallel segment encode + order-preserving concat."""
     from app.services import batch_service

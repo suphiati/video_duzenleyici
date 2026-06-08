@@ -67,6 +67,62 @@ def segment_encoder_args(crf: int = 20) -> list[str]:
     return ["-c:v", "libx264", "-preset", "fast", "-crf", str(crf)]
 
 
+def _clip_has_effects(clip: dict) -> bool:
+    """True if the clip carries a non-neutral colour adjustment."""
+    return (
+        abs(float(clip.get("brightness", 0.0) or 0.0)) > 1e-3
+        or abs(float(clip.get("contrast", 1.0) if clip.get("contrast") is not None else 1.0) - 1.0) > 1e-3
+        or abs(float(clip.get("saturation", 1.0) if clip.get("saturation") is not None else 1.0) - 1.0) > 1e-3
+    )
+
+
+def _eq_filter(clip: dict) -> str | None:
+    """Build an ffmpeg ``eq=`` filter string for a clip, or None if neutral."""
+    if not _clip_has_effects(clip):
+        return None
+    b = float(clip.get("brightness", 0.0) or 0.0)
+    c = float(clip.get("contrast", 1.0) if clip.get("contrast") is not None else 1.0)
+    s = float(clip.get("saturation", 1.0) if clip.get("saturation") is not None else 1.0)
+    return f"eq=brightness={b:.3f}:contrast={c:.3f}:saturation={s:.3f}"
+
+
+def _encode_clip_normalized(clip: dict, output_path: str, w: str, h: str, settings: dict):
+    """Trim + optional colour eq + normalise to target res/codec.
+
+    Used only when at least one clip has effects, so all clips share identical
+    codec params and the demuxer concat stays valid.
+    """
+    in_point = float(clip.get("in_point", 0) or 0)
+    out_point = float(clip.get("out_point", -1) if clip.get("out_point") is not None else -1)
+
+    vf = []
+    eq = _eq_filter(clip)
+    if eq:
+        vf.append(eq)
+    vf.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease")
+    vf.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
+    vf.append("setsar=1")
+    vf.append(f"format={settings['pixel_format']}")
+
+    cmd = [FFMPEG_BIN, "-y"]
+    if in_point > 0:
+        cmd += ["-ss", str(in_point)]
+    cmd += ["-i", clip["media_path"]]
+    if out_point > 0:
+        cmd += ["-t", str(out_point - in_point)]
+    cmd += [
+        "-vf", ",".join(vf),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k", "-ar", str(settings["audio_sample_rate"]), "-ac", "2",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise RuntimeError(f"Klip efekti uygulanamadi: {result.stderr[-400:]}")
+
+
 def trim_clip(input_path: str, output_path: str, in_point: float, out_point: float):
     """Trim a clip using stream copy (fast, no re-encoding)."""
     cmd = [FFMPEG_BIN, "-y", "-i", input_path]
@@ -121,12 +177,22 @@ async def export_project(
     run_id = uuid.uuid4().hex[:8]  # unique per export so concurrent runs never collide
 
     try:
-        # Step 1: Trim clips
+        # Step 1: Trim clips. If any clip carries colour effects, every clip is
+        # re-encoded + normalised (so the concat stays uniform); otherwise the
+        # fast stream-copy trim path is used unchanged.
+        any_effects = any(_clip_has_effects(c) for c in clips)
+        w_t, h_t = settings["resolution"].split("x")
         trimmed_paths = []
         for i, clip in enumerate(clips):
             media_path = clip["media_path"]
             if not Path(media_path).exists():
                 raise RuntimeError(f"Klip dosyasi bulunamadi: {media_path}")
+            if any_effects:
+                fx = str(TEMP_DIR / f"fx_{run_id}_{i}.mp4")
+                await asyncio.to_thread(_encode_clip_normalized, clip, fx, w_t, h_t, settings)
+                temp_files.append(fx)
+                trimmed_paths.append(fx)
+                continue
             trimmed = str(TEMP_DIR / f"trimmed_{run_id}_{i}.mp4")
             if clip.get("in_point", 0) > 0 or clip.get("out_point", -1) > 0:
                 trim_clip(media_path, trimmed, clip.get("in_point", 0), clip.get("out_point", -1))

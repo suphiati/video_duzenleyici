@@ -395,6 +395,10 @@ app.selectClip = (clipId) => {
         $('audioPropsSection').style.display = 'none';
         $('clipInPoint').value = clip.in_point;
         $('clipOutPoint').value = clip.out_point;
+        const b = clip.brightness ?? 0, c = clip.contrast ?? 1, s = clip.saturation ?? 1;
+        $('clipBrightness').value = b; $('clipBrightnessLabel').textContent = b;
+        $('clipContrast').value = c; $('clipContrastLabel').textContent = c;
+        $('clipSaturation').value = s; $('clipSaturationLabel').textContent = s;
         app.previewMedia(clip.media_path, 'video');
     }
     renderTimeline();
@@ -420,6 +424,10 @@ app.updateClipProp = async () => {
     if (clip) {
         clip.in_point = parseFloat($('clipInPoint').value) || 0;
         clip.out_point = parseFloat($('clipOutPoint').value) || -1;
+        let b = parseFloat($('clipBrightness').value); if (isNaN(b)) b = 0;
+        let c = parseFloat($('clipContrast').value); if (isNaN(c)) c = 1;
+        let s = parseFloat($('clipSaturation').value); if (isNaN(s)) s = 1;
+        clip.brightness = b; clip.contrast = c; clip.saturation = s;
         try {
             const data = await api.updateClip(state.project.id, clip.id, clip);
             state.project = data;
@@ -427,6 +435,13 @@ app.updateClipProp = async () => {
             toast('Klip guncellenemedi: ' + e.message, 'error');
         }
     }
+};
+
+app.resetClipColor = () => {
+    $('clipBrightness').value = 0; $('clipBrightnessLabel').textContent = '0';
+    $('clipContrast').value = 1; $('clipContrastLabel').textContent = '1';
+    $('clipSaturation').value = 1; $('clipSaturationLabel').textContent = '1';
+    app.updateClipProp();
 };
 
 app.updateAudioProp = async () => {

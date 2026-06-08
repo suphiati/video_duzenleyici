@@ -649,6 +649,10 @@ async def run_batch(
             # Pick music per-video (first one was picked for beat analysis).
             if i == 0 and pro_music_pick:
                 music_for_this = pro_music_pick
+            elif pro_meta.get("beats_available") and pro_music_pick:
+                # Plans were beat-synced to this track's tempo — reuse the same
+                # track across the batch so the cuts actually land on the beat.
+                music_for_this = pro_music_pick
             else:
                 music_for_this = _select_music(pro_profile, pro_settings, used=used_music)
             if music_for_this:
