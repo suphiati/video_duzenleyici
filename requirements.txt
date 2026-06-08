@@ -5,3 +5,10 @@ aiofiles==24.1.0
 Pillow==11.1.0
 pydantic==2.10.4
 websockets==14.1
+google-api-python-client==2.150.0
+google-auth==2.36.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+httpx==0.28.1
+# Optional — enables pro-mode beat-synced cutting. Skip if disk budget matters.
+# librosa==0.10.2

@@ -910,6 +910,482 @@ app.createVideoMix = async () => {
     }
 };
 
+// ─── Batch Video Dialog ───
+app.showBatchDialog = () => {
+    const html = `
+        <p style="font-size:13px;margin-bottom:12px">
+            Bir klasor secin, icindeki video ve fotograflardan otomatik olarak
+            birden fazla video olusturup YouTube'a yukleyin.
+        </p>
+        <div class="prop-row">
+            <label>Klasor Yolu</label>
+            <div style="display:flex;gap:4px">
+                <input type="text" id="batchFolderPath" placeholder="C:\\Users\\...\\Roma" style="flex:1"
+                    value="${escAttr(state.currentPath || '')}">
+                <button onclick="app.batchUseBrowser()" title="Dosya gezginindeki klasoru kullan">Secili</button>
+                <button onclick="app.batchScanFolder()">Tara</button>
+            </div>
+        </div>
+        <div id="batchScanResult" style="display:none;padding:8px;background:var(--bg-lighter);border-radius:4px;margin-bottom:8px;font-size:12px"></div>
+        <div class="prop-row">
+            <label>Kac video olusturulsun</label>
+            <input type="number" id="batchNumVideos" value="5" min="1" max="20">
+        </div>
+        <div class="prop-row">
+            <label>Video suresi</label>
+            <select id="batchDuration">
+                <option value="180">3 dakika</option>
+                <option value="300" selected>5 dakika</option>
+                <option value="600">10 dakika</option>
+                <option value="900">15 dakika</option>
+            </select>
+        </div>
+        <div class="prop-row">
+            <label>Klip suresi (sn)</label>
+            <input type="number" id="batchClipDuration" value="5" min="2" max="30" step="0.5">
+        </div>
+        <div class="prop-row">
+            <label>Fotograf suresi (sn)</label>
+            <input type="number" id="batchPhotoDuration" value="4" min="2" max="10" step="0.5">
+        </div>
+        <div class="prop-row">
+            <label>Gecis efekti</label>
+            <select id="batchTransition">
+                <option value="fade">Solma</option>
+                <option value="dissolve">Erime</option>
+                <option value="wipeleft">Silme (Sol)</option>
+                <option value="none">Gecis Yok (Hizli)</option>
+            </select>
+        </div>
+        <div class="prop-row">
+            <label>Gecis suresi (sn)</label>
+            <input type="number" id="batchTransDuration" value="0.5" min="0.1" max="2" step="0.1">
+        </div>
+        <hr style="border-color:var(--border);margin:12px 0">
+        <h3 style="margin-bottom:8px;font-size:14px">Profesyonel Kurgu</h3>
+        <div class="prop-row">
+            <label>
+                <input type="checkbox" id="batchProEnabled">
+                Akilli kurgu (sahne tespiti + ritim senkronu)
+            </label>
+        </div>
+        <div class="prop-row">
+            <label>Stil</label>
+            <select id="batchProStyle">
+                <option value="auto" selected>Otomatik (dengeli)</option>
+                <option value="vlog">Vlog (hizli, enerjik)</option>
+                <option value="cinematic">Sinematik (yavas, uzun)</option>
+                <option value="highlight">Ozet/Highlight (en iyi sahneler)</option>
+                <option value="calm">Sakin (relaks)</option>
+            </select>
+        </div>
+        <div class="prop-row">
+            <label>Muzik</label>
+            <select id="batchProMusic">
+                <option value="auto" selected>Otomatik (kutuphaneden sec)</option>
+                <option value="none">Muzik yok (orijinal ses)</option>
+                <option value="specific">Belirli dosya...</option>
+            </select>
+        </div>
+        <div class="prop-row" id="batchProMusicPathRow" style="display:none">
+            <label>Muzik dosyasi</label>
+            <select id="batchProMusicPath">
+                <option value="">(secim yok)</option>
+            </select>
+        </div>
+        <div id="batchProStatus" style="font-size:11px;color:var(--text-muted);margin-bottom:8px"></div>
+        <hr style="border-color:var(--border);margin:12px 0">
+        <h3 style="margin-bottom:8px;font-size:14px">Yapay Zeka (Ollama)</h3>
+        <div class="prop-row" style="margin-bottom:8px">
+            <div id="aiStatus" style="font-size:12px;color:var(--text-muted)">Ollama kontrol ediliyor...</div>
+        </div>
+        <div class="prop-row">
+            <label>
+                <input type="checkbox" id="batchAIEnabled">
+                Baslik, aciklama ve etiketleri yapay zeka uretsin
+            </label>
+        </div>
+        <div class="prop-row">
+            <label>Model</label>
+            <select id="batchAIModel">
+                <option value="">(varsayilan)</option>
+            </select>
+        </div>
+        <div class="prop-row">
+            <label>Dil</label>
+            <select id="batchAILanguage">
+                <option value="tr" selected>Turkce</option>
+                <option value="en">Ingilizce</option>
+            </select>
+        </div>
+        <hr style="border-color:var(--border);margin:12px 0">
+        <h3 style="margin-bottom:8px;font-size:14px">YouTube Ayarlari</h3>
+        <div class="prop-row" style="margin-bottom:8px">
+            <div id="ytAuthStatus" style="font-size:12px;color:var(--text-muted)">YouTube durumu kontrol ediliyor...</div>
+            <button id="ytAuthBtn" onclick="app.connectYouTube()" style="display:none">YouTube Bagla</button>
+        </div>
+        <div class="prop-row">
+            <label>
+                <input type="checkbox" id="batchUploadYT" checked>
+                YouTube'a yukle
+            </label>
+        </div>
+        <div class="prop-row">
+            <label>Baslik sablonu</label>
+            <input type="text" id="batchTitleTemplate" value="{folder_name} - Bolum {part_number}">
+            <small style="color:var(--text-muted);font-size:10px">{folder_name} ve {part_number} otomatik degisir</small>
+        </div>
+        <div class="prop-row">
+            <label>Aciklama</label>
+            <textarea id="batchDescription" rows="2" style="width:100%;resize:vertical"></textarea>
+        </div>
+        <div class="prop-row">
+            <label>Etiketler (virgul ile)</label>
+            <input type="text" id="batchTags" placeholder="tatil, roma, vlog">
+        </div>
+        <div class="prop-row">
+            <label>Gizlilik</label>
+            <select id="batchPrivacy">
+                <option value="private" selected>Ozel</option>
+                <option value="unlisted">Liste disi</option>
+                <option value="public">Herkese acik</option>
+            </select>
+        </div>
+    `;
+    showModal('Toplu Video Olustur', html, [
+        { text: 'Iptal', class: '', onclick: 'closeModal()' },
+        { text: 'Olustur ve Yukle', class: 'primary', onclick: 'app.startBatch()' },
+    ]);
+    // Check YouTube, AI & Pro status
+    app.checkYouTubeStatus();
+    app.checkAIStatus();
+    app.checkProStatus();
+
+    // Wire music-mode toggle
+    const musicSelect = document.getElementById('batchProMusic');
+    if (musicSelect) {
+        musicSelect.addEventListener('change', () => {
+            const row = document.getElementById('batchProMusicPathRow');
+            if (row) row.style.display = musicSelect.value === 'specific' ? 'block' : 'none';
+        });
+    }
+};
+
+app.checkProStatus = async () => {
+    const statusEl = document.getElementById('batchProStatus');
+    try {
+        const [pro, music] = await Promise.all([api.proStatus(), api.musicList()]);
+        const beatInfo = pro.beat_sync_available
+            ? 'ritim senkronu acik'
+            : 'ritim senkronu kapali (librosa yuklu degil)';
+        const musicInfo = music.count > 0
+            ? `${music.count} muzik dosyasi`
+            : 'Muzik yok (data/music/ klasorune mp3 ekleyin)';
+        if (statusEl) statusEl.textContent = `${beatInfo} - ${musicInfo}`;
+
+        const sel = document.getElementById('batchProMusicPath');
+        if (sel && music.tracks) {
+            sel.innerHTML = '<option value="">(secim yok)</option>' +
+                music.tracks.map(t => `<option value="${escAttr(t.path)}">${escHtml(t.mood)}: ${escHtml(t.name)}</option>`).join('');
+        }
+    } catch (e) {
+        if (statusEl) statusEl.textContent = 'Pro durum alinamadi';
+    }
+};
+
+app.batchUseBrowser = () => {
+    const inp = document.getElementById('batchFolderPath');
+    if (inp && state.currentPath) inp.value = state.currentPath;
+};
+
+app.checkAIStatus = async () => {
+    const statusEl = document.getElementById('aiStatus');
+    const modelSel = document.getElementById('batchAIModel');
+    const enabledCb = document.getElementById('batchAIEnabled');
+    try {
+        const data = await api.aiStatus();
+        if (data.available) {
+            statusEl.innerHTML = `<span style="color:var(--success)">Ollama bagli</span> - ${data.models.length} model`;
+            if (modelSel) {
+                modelSel.innerHTML = '<option value="">(varsayilan: ' + escHtml(data.default_model) + ')</option>';
+                (data.models || []).forEach(m => {
+                    modelSel.innerHTML += `<option value="${escAttr(m)}">${escHtml(m)}</option>`;
+                });
+            }
+        } else {
+            statusEl.innerHTML = `<span style="color:var(--warning)">Ollama bulunamadi (${escHtml(data.host)})</span> - sablon basliklar kullanilir`;
+            if (enabledCb) enabledCb.disabled = true;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--warning)">Ollama durumu alinamadi</span>`;
+        if (enabledCb) enabledCb.disabled = true;
+    }
+};
+
+app.batchScanFolder = async () => {
+    const folderPath = document.getElementById('batchFolderPath')?.value;
+    if (!folderPath) {
+        toast('Klasor yolu giriniz', 'error');
+        return;
+    }
+    const resultDiv = document.getElementById('batchScanResult');
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = 'Taraniyor...';
+    try {
+        const data = await api.batchScan(folderPath);
+        const durMin = Math.floor(data.total_video_duration / 60);
+        const durSec = Math.floor(data.total_video_duration % 60);
+        resultDiv.innerHTML = `
+            <b>${escHtml(data.folder_name)}</b> klasoru:<br>
+            ${data.video_count} video | ${data.photo_count} fotograf |
+            Toplam sure: ${durMin}dk ${durSec}sn
+        `;
+    } catch (e) {
+        resultDiv.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message)}</span>`;
+    }
+};
+
+app.checkYouTubeStatus = async () => {
+    try {
+        const data = await api.youtubeStatus();
+        const statusEl = document.getElementById('ytAuthStatus');
+        const btnEl = document.getElementById('ytAuthBtn');
+        if (data.authenticated) {
+            statusEl.innerHTML = '<span style="color:var(--success)">YouTube bagli</span>';
+            if (btnEl) btnEl.style.display = 'none';
+        } else {
+            statusEl.innerHTML = '<span style="color:var(--warning)">YouTube bagli degil</span>';
+            if (btnEl) btnEl.style.display = 'inline-block';
+        }
+    } catch {
+        const statusEl = document.getElementById('ytAuthStatus');
+        if (statusEl) statusEl.innerHTML = 'YouTube durumu kontrol edilemedi';
+    }
+};
+
+app.connectYouTube = async () => {
+    try {
+        const data = await api.youtubeAuthUrl();
+        window.open(data.url, '_blank', 'width=600,height=700');
+        toast('YouTube giris sayfasi acildi. Giris yaptiktan sonra bu sayfaya donun.', '');
+
+        // Listen for auth success message from popup
+        window.addEventListener('message', function handler(e) {
+            if (e.data && e.data.type === 'youtube_auth_success') {
+                window.removeEventListener('message', handler);
+                app.checkYouTubeStatus();
+                toast('YouTube baglantisi basarili!', 'success');
+            }
+        });
+    } catch (e) {
+        toast('YouTube baglanti hatasi: ' + e.message, 'error');
+    }
+};
+
+app.startBatch = async () => {
+    const folderPath = document.getElementById('batchFolderPath')?.value;
+    if (!folderPath) {
+        toast('Klasor yolu giriniz', 'error');
+        return;
+    }
+
+    const numVideos = parseInt(document.getElementById('batchNumVideos')?.value) || 5;
+    const targetDuration = parseFloat(document.getElementById('batchDuration')?.value) || 300;
+    const clipDuration = parseFloat(document.getElementById('batchClipDuration')?.value) || 5;
+    const photoDuration = parseFloat(document.getElementById('batchPhotoDuration')?.value) || 4;
+    const transition = document.getElementById('batchTransition')?.value || 'fade';
+    const transDuration = parseFloat(document.getElementById('batchTransDuration')?.value) || 0.5;
+    const uploadYT = document.getElementById('batchUploadYT')?.checked ?? true;
+    const titleTemplate = document.getElementById('batchTitleTemplate')?.value || '{folder_name} - Bolum {part_number}';
+    const description = document.getElementById('batchDescription')?.value || '';
+    const tagsStr = document.getElementById('batchTags')?.value || '';
+    const tags = tagsStr ? tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const privacy = document.getElementById('batchPrivacy')?.value || 'private';
+    const aiEnabled = document.getElementById('batchAIEnabled')?.checked ?? false;
+    const aiModel = document.getElementById('batchAIModel')?.value || '';
+    const aiLanguage = document.getElementById('batchAILanguage')?.value || 'tr';
+    const proEnabled = document.getElementById('batchProEnabled')?.checked ?? false;
+    const proStyle = document.getElementById('batchProStyle')?.value || 'auto';
+    const proMusicMode = document.getElementById('batchProMusic')?.value || 'auto';
+    const proMusicPath = document.getElementById('batchProMusicPath')?.value || '';
+
+    closeModal();
+
+    // Build progress UI
+    let videoCards = '';
+    for (let i = 0; i < numVideos; i++) {
+        videoCards += `
+            <div class="batch-video-card" id="batchCard${i}" style="padding:8px;margin-bottom:6px;background:var(--bg-lighter);border-radius:4px;font-size:12px">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <span id="batchTitle${i}">Video ${i + 1}</span>
+                    <span id="batchStatus${i}" style="color:var(--text-muted)">Bekliyor</span>
+                </div>
+                <div class="progress-bar" style="margin-top:4px"><div class="fill" id="batchFill${i}" style="width:0%"></div></div>
+                <div id="batchLink${i}" style="margin-top:4px;display:none"></div>
+            </div>
+        `;
+    }
+
+    showModal('Toplu Video Olusturuluyor', `
+        <div id="batchOverallStatus" style="margin-bottom:8px;font-size:13px">Baslaniyor...</div>
+        <div id="batchVideoCards">${videoCards}</div>
+    `, [
+        { text: 'Iptal', class: '', id: 'batchCancelBtn', onclick: 'app.cancelBatch()' },
+    ]);
+
+    // Connect WebSocket
+    const ws = new WebSocket(api.batchWsUrl());
+    state.batchWs = ws;
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({
+            folder_path: folderPath,
+            num_videos: numVideos,
+            target_duration: targetDuration,
+            clip_duration: clipDuration,
+            photo_duration: photoDuration,
+            transition: transition,
+            transition_duration: transDuration,
+            shuffle: false,
+            upload_to_youtube: uploadYT,
+            youtube_settings: {
+                title_template: titleTemplate,
+                description: description,
+                tags: tags,
+                privacy: privacy,
+            },
+            ai_settings: {
+                enabled: aiEnabled,
+                model: aiModel || null,
+                language: aiLanguage,
+                append_default_description: true,
+            },
+            pro_settings: {
+                enabled: proEnabled,
+                style: proStyle,
+                music_mode: proMusicMode,
+                music_path: proMusicMode === 'specific' ? (proMusicPath || null) : null,
+            },
+        }));
+    };
+
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === 'status') {
+            const el = document.getElementById('batchOverallStatus');
+            if (el) el.textContent = msg.message;
+        }
+        else if (msg.type === 'scan_complete') {
+            const el = document.getElementById('batchOverallStatus');
+            if (el) el.textContent = `${msg.folder_name}: ${msg.video_count} video, ${msg.photo_count} fotograf bulundu`;
+        }
+        else if (msg.type === 'pro_status') {
+            const el = document.getElementById('batchOverallStatus');
+            if (el) {
+                const parts = [];
+                if (msg.style) parts.push(`stil: ${escHtml(msg.style)}`);
+                if (typeof msg.candidates === 'number') parts.push(`${msg.candidates} sahne adayi`);
+                if (msg.tempo) parts.push(`${msg.tempo} BPM`);
+                if (msg.music) parts.push(`muzik: ${escHtml(msg.music)}`);
+                if (msg.message) parts.push(escHtml(msg.message));
+                el.innerHTML = `<span style="color:var(--primary)">${parts.join(' - ')}</span>`;
+            }
+        }
+        else if (msg.type === 'ai_status') {
+            const el = document.getElementById('batchOverallStatus');
+            if (el) {
+                const line = msg.available
+                    ? `AI aktif (${escHtml(msg.model || '')})`
+                    : (msg.message || 'AI kullanilmiyor');
+                el.innerHTML = `<span style="color:var(${msg.available ? '--success' : '--warning'})">${line}</span>`;
+            }
+        }
+        else if (msg.type === 'started') {
+            const el = document.getElementById('batchOverallStatus');
+            if (el) el.textContent = `${msg.total_videos} video olusturulacak...`;
+        }
+        else if (msg.type === 'video_status') {
+            const idx = msg.index;
+            const titleEl = document.getElementById(`batchTitle${idx}`);
+            const statusEl = document.getElementById(`batchStatus${idx}`);
+            const fillEl = document.getElementById(`batchFill${idx}`);
+            const linkEl = document.getElementById(`batchLink${idx}`);
+
+            if (titleEl && msg.title) titleEl.textContent = msg.title;
+
+            if (msg.status === 'creating') {
+                if (statusEl) { statusEl.textContent = 'Olusturuluyor...'; statusEl.style.color = 'var(--primary)'; }
+                if (fillEl) fillEl.style.width = (msg.progress || 0) + '%';
+            }
+            else if (msg.status === 'uploading') {
+                const pct = typeof msg.progress === 'number' ? msg.progress : 0;
+                if (statusEl) {
+                    statusEl.textContent = `YouTube yukluyor... %${pct.toFixed(0)}`;
+                    statusEl.style.color = 'var(--warning)';
+                }
+                if (fillEl) fillEl.style.width = (90 + pct * 0.1).toFixed(1) + '%';
+            }
+            else if (msg.status === 'completed') {
+                if (statusEl) { statusEl.textContent = 'Tamamlandi!'; statusEl.style.color = 'var(--success)'; }
+                if (fillEl) fillEl.style.width = '100%';
+                if (linkEl && msg.youtube_url) {
+                    linkEl.style.display = 'block';
+                    linkEl.innerHTML = `<a href="${escHtml(msg.youtube_url)}" target="_blank" style="color:var(--primary)">YouTube'da izle</a>`;
+                }
+                if (linkEl && msg.output_path && !msg.youtube_url) {
+                    linkEl.style.display = 'block';
+                    linkEl.textContent = 'Dosya: ' + msg.output_path;
+                }
+                toast(`Video ${idx + 1} tamamlandi!`, 'success');
+            }
+            else if (msg.status === 'error' || msg.status === 'upload_error') {
+                if (statusEl) { statusEl.textContent = 'Hata!'; statusEl.style.color = 'var(--danger)'; }
+                if (linkEl) {
+                    linkEl.style.display = 'block';
+                    linkEl.innerHTML = `<span style="color:var(--danger)">${escHtml(msg.error || '')}</span>`;
+                }
+                if (msg.output_path) {
+                    linkEl.innerHTML += `<br><span style="font-size:11px">Dosya: ${escHtml(msg.output_path)}</span>`;
+                }
+            }
+        }
+        else if (msg.type === 'batch_completed') {
+            const el = document.getElementById('batchOverallStatus');
+            if (el) el.innerHTML = `<b>Tamamlandi!</b> ${msg.completed}/${msg.total} video basariyla olusturuldu.`;
+            const cancelBtn = document.getElementById('batchCancelBtn');
+            if (cancelBtn) { cancelBtn.textContent = 'Kapat'; cancelBtn.onclick = () => closeModal(); }
+            toast('Toplu video islemi tamamlandi!', 'success');
+        }
+        else if (msg.type === 'error') {
+            const el = document.getElementById('batchOverallStatus');
+            if (el) el.innerHTML = `<span style="color:var(--danger)">Hata: ${escHtml(msg.message)}</span>`;
+            toast('Hata: ' + msg.message, 'error');
+        }
+        else if (msg.type === 'cancelled') {
+            const el = document.getElementById('batchOverallStatus');
+            if (el) el.textContent = `Iptal edildi. ${msg.completed_count} video tamamlandi.`;
+        }
+    };
+
+    ws.onerror = () => {
+        toast('WebSocket baglanti hatasi', 'error');
+    };
+
+    ws.onclose = () => {
+        state.batchWs = null;
+    };
+};
+
+app.cancelBatch = () => {
+    if (state.batchWs && state.batchWs.readyState === WebSocket.OPEN) {
+        state.batchWs.send(JSON.stringify({ action: 'cancel' }));
+        toast('Iptal istegi gonderildi...', '');
+    } else {
+        closeModal();
+    }
+};
+
 // ─── Modal ───
 function showModal(title, bodyHtml, buttons = []) {
     const btnHtml = buttons.map(b =>

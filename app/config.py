@@ -10,8 +10,15 @@ TEMP_DIR = DATA_DIR / "temp"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MEDIA_LIBRARY_FILE = DATA_DIR / "media_library.json"
 
-for d in [PROJECTS_DIR, THUMBNAILS_DIR, EXPORTS_DIR, TEMP_DIR]:
+YOUTUBE_DIR = DATA_DIR / "youtube"
+MUSIC_DIR = DATA_DIR / "music"
+SCENES_CACHE_FILE = DATA_DIR / "scenes_cache.json"
+
+for d in [PROJECTS_DIR, THUMBNAILS_DIR, EXPORTS_DIR, TEMP_DIR, YOUTUBE_DIR, MUSIC_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+YOUTUBE_CLIENT_SECRETS = YOUTUBE_DIR / "client_secrets.json"
+YOUTUBE_TOKEN_FILE = YOUTUBE_DIR / "token.json"
 
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
 FFPROBE_BIN = shutil.which("ffprobe") or "ffprobe"

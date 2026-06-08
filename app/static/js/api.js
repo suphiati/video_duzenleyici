@@ -53,4 +53,13 @@ export const api = {
 
     // Video Mix
     createVideoMix: (data) => request('/api/videomix/create', { method: 'POST', body: JSON.stringify(data) }),
+
+    // Batch
+    batchScan: (folderPath) => request('/api/batch/scan', { method: 'POST', body: JSON.stringify({ folder_path: folderPath }) }),
+    batchWsUrl: () => `ws://${location.host}/api/batch/ws`,
+    youtubeStatus: () => request('/api/batch/youtube/status'),
+    youtubeAuthUrl: () => request('/api/batch/youtube/auth-url'),
+    aiStatus: () => request('/api/batch/ai/status'),
+    proStatus: () => request('/api/batch/pro/status'),
+    musicList: () => request('/api/batch/music/list'),
 };

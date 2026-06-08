@@ -1,0 +1,608 @@
+import asyncio
+import math
+import shutil
+import subprocess
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+from app.config import FFMPEG_BIN, TEMP_DIR, EXPORTS_DIR
+from app.services.ffmpeg_service import (
+    create_slideshow,
+    _concat_with_demuxer,
+    _concat_with_xfade,
+)
+from app.services.folder_scanner import scan_folder
+from app.services import (
+    youtube_service,
+    ai_service,
+    pro_planner,
+    music_library,
+    beat_analyzer,
+    audio_mixer,
+)
+
+
+# ---------------------------------------------------------------------------
+# Legacy planner (used when pro mode is disabled)
+# ---------------------------------------------------------------------------
+
+def plan_content_distribution(
+    videos: list[dict],
+    photos: list[dict],
+    num_videos: int,
+    target_duration: float,
+    clip_duration: float,
+    photo_duration: float,
+) -> list[list[dict]]:
+    plans = [[] for _ in range(num_videos)]
+    video_groups = _split_into_groups(videos, num_videos)
+    photo_groups = _split_into_groups(photos, num_videos)
+
+    for i in range(num_videos):
+        group_videos = video_groups[i]
+        group_photos = photo_groups[i]
+
+        photo_total_time = len(group_photos) * photo_duration
+        video_target_time = target_duration - photo_total_time
+        if video_target_time < target_duration * 0.5:
+            video_target_time = target_duration * 0.7
+            photo_total_time = target_duration * 0.3
+
+        video_segments = _plan_video_segments(group_videos, video_target_time, clip_duration)
+        plan = _interleave_content(video_segments, group_photos, photo_duration)
+
+        accumulated = 0.0
+        trimmed_plan = []
+        for item in plan:
+            item_dur = (item["end"] - item["start"]) if item["type"] == "video" else item["duration"]
+            if accumulated + item_dur > target_duration + 1:
+                remaining = target_duration - accumulated
+                if remaining > 0.5:
+                    if item["type"] == "video":
+                        item["end"] = item["start"] + remaining
+                    else:
+                        item["duration"] = remaining
+                    trimmed_plan.append(item)
+                break
+            trimmed_plan.append(item)
+            accumulated += item_dur
+
+        plans[i] = trimmed_plan
+
+    return plans
+
+
+def _split_into_groups(items: list, n: int) -> list[list]:
+    if not items:
+        return [[] for _ in range(n)]
+    groups = []
+    size = len(items)
+    base = size // n
+    remainder = size % n
+    start = 0
+    for i in range(n):
+        chunk = base + (1 if i < remainder else 0)
+        groups.append(items[start:start + chunk])
+        start += chunk
+    return groups
+
+
+def _plan_video_segments(videos: list[dict], target_time: float, clip_duration: float) -> list[dict]:
+    if not videos:
+        return []
+    segments = []
+    num_segments_needed = max(1, math.ceil(target_time / clip_duration))
+    num_videos = len(videos)
+    for seg_idx in range(num_segments_needed):
+        src_idx = seg_idx % num_videos
+        src = videos[src_idx]
+        src_dur = src["duration"]
+        existing = [s for s in segments if s["path"] == src["path"]]
+        n_existing = len(existing)
+        available_dur = src_dur - clip_duration
+        if available_dur <= 0:
+            start, end = 0.0, min(src_dur, clip_duration)
+        else:
+            step = available_dur / max(1, math.ceil(num_segments_needed / num_videos))
+            start = (n_existing * step) % available_dur
+            end = start + clip_duration
+            if end > src_dur:
+                start = max(0.0, src_dur - clip_duration)
+                end = src_dur
+        segments.append({
+            "type": "video", "path": src["path"],
+            "start": round(start, 2), "end": round(end, 2),
+        })
+    return segments
+
+
+def _interleave_content(video_segments: list[dict], photos: list[dict],
+                        photo_duration: float) -> list[dict]:
+    if not photos:
+        return video_segments
+    if not video_segments:
+        return [{"type": "photo", "path": p["path"], "duration": photo_duration} for p in photos]
+    result = []
+    insert_interval = max(1, len(video_segments) // (len(photos) + 1))
+    photo_idx = 0
+    for i, seg in enumerate(video_segments):
+        result.append(seg)
+        if (i + 1) % insert_interval == 0 and photo_idx < len(photos):
+            result.append({"type": "photo", "path": photos[photo_idx]["path"],
+                           "duration": photo_duration})
+            photo_idx += 1
+    while photo_idx < len(photos):
+        result.append({"type": "photo", "path": photos[photo_idx]["path"],
+                       "duration": photo_duration})
+        photo_idx += 1
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Blocking helpers
+# ---------------------------------------------------------------------------
+
+def _encode_video_segment(item: dict, temp_path: str, w: str, h: str) -> bool:
+    seg_dur = item["end"] - item["start"]
+    cmd = [
+        FFMPEG_BIN, "-y",
+        "-ss", str(item["start"]),
+        "-t", str(seg_dur),
+        "-i", item["path"],
+        "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+               f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart",
+        temp_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+    return result.returncode == 0
+
+
+def _encode_photo_segment(item: dict, temp_path: str) -> bool:
+    try:
+        create_slideshow(
+            images=[item["path"]],
+            output_path=temp_path,
+            duration_per_image=item["duration"],
+            transition="fade",
+            transition_duration=0.5,
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def create_batch_video(
+    content_plan: list[dict],
+    output_path: str,
+    transition: str,
+    transition_duration: float,
+    resolution: str = "1920x1080",
+    progress_callback=None,
+) -> str:
+    """Render one batch video from a content plan. FFmpeg runs in a thread."""
+    w, h = resolution.split("x")
+    temp_clips: list[str] = []
+    temp_files: list[str] = []
+    batch_id = str(uuid.uuid4())[:8]
+
+    try:
+        total_items = len(content_plan)
+
+        for i, item in enumerate(content_plan):
+            if item["type"] == "video":
+                temp_path = str(TEMP_DIR / f"batch_{batch_id}_seg_{i}.mp4")
+                temp_files.append(temp_path)
+                ok = await asyncio.to_thread(_encode_video_segment, item, temp_path, w, h)
+                if not ok:
+                    temp_files.pop()
+                    continue
+                temp_clips.append(temp_path)
+            elif item["type"] == "photo":
+                temp_path = str(TEMP_DIR / f"batch_{batch_id}_photo_{i}.mp4")
+                temp_files.append(temp_path)
+                ok = await asyncio.to_thread(_encode_photo_segment, item, temp_path)
+                if not ok:
+                    temp_files.pop()
+                    continue
+                temp_clips.append(temp_path)
+
+            if progress_callback:
+                percent = ((i + 1) / total_items) * 75
+                await progress_callback(percent)
+
+        if not temp_clips:
+            raise RuntimeError("Hicbir klip olusturulamadi")
+
+        if len(temp_clips) == 1:
+            await asyncio.to_thread(shutil.copy2, temp_clips[0], output_path)
+        elif transition != "none" and 4 <= len(temp_clips) <= 20:
+            await asyncio.to_thread(_concat_with_xfade, temp_clips, output_path,
+                                    transition, transition_duration, w, h)
+        else:
+            await asyncio.to_thread(_concat_with_demuxer, temp_clips, output_path)
+
+        if progress_callback:
+            await progress_callback(85)
+
+        return output_path
+    finally:
+        for tf in temp_files:
+            try:
+                Path(tf).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Pro pipeline glue
+# ---------------------------------------------------------------------------
+
+def _select_music(profile: dict, settings: dict, used: set[str]) -> dict | None:
+    mode = (settings or {}).get("music_mode", "auto")
+    if mode == "none":
+        return None
+    if mode == "specific":
+        path = (settings or {}).get("music_path")
+        if not path or not Path(path).exists():
+            return None
+        return {"path": path, "mood": "custom"}
+    # auto: pick from library, prefer profile mood
+    track = music_library.pick_track(
+        preferred_mood=profile.get("prefer_mood"),
+        exclude=used,
+    )
+    return track
+
+
+def _analyze_beats_sync(music_path: str) -> tuple[list[float] | None, float | None]:
+    info = beat_analyzer.analyze(music_path)
+    if not info:
+        return None, None
+    return info.beats, info.tempo
+
+
+async def _build_pro_plans(
+    scan_result: dict,
+    num_videos: int,
+    target_duration: float,
+    pro_settings: dict,
+    send_message,
+):
+    """Run scene detection + beat analysis, return (plans, meta, music_pick)."""
+    profile = pro_planner.get_profile(pro_settings.get("style", "auto"))
+
+    # Music pre-selection so beat analysis can feed into planning.
+    music_pick = _select_music(profile, pro_settings, used=set())
+
+    beats: list[float] | None = None
+    tempo: float | None = None
+    if music_pick and profile.get("beat_sync") and beat_analyzer.is_available():
+        await send_message({"type": "pro_status",
+                            "message": f"Muzik ritmi analiz ediliyor: {Path(music_pick['path']).name}"})
+        beats, tempo = await asyncio.to_thread(_analyze_beats_sync, music_pick["path"])
+
+    await send_message({"type": "pro_status",
+                        "message": "Sahneler tespit ediliyor..."})
+    plans, meta = await asyncio.to_thread(
+        pro_planner.build_plans,
+        scan_result["videos"],
+        scan_result["photos"],
+        num_videos,
+        target_duration,
+        pro_settings.get("style", "auto"),
+        beats,
+        tempo,
+    )
+
+    await send_message({
+        "type": "pro_status",
+        "style": meta["style"],
+        "candidates": meta["total_candidates"],
+        "tempo": meta.get("tempo"),
+        "music": Path(music_pick["path"]).name if music_pick else None,
+    })
+    return plans, meta, music_pick
+
+
+async def _apply_music_track(
+    raw_path: str,
+    final_path: str,
+    music_path: str,
+    profile: dict,
+    overrides: dict,
+) -> None:
+    video_vol = overrides.get("original_audio_volume") or profile.get("original_audio_volume", 0.55)
+    music_vol = overrides.get("music_volume") or profile.get("music_volume", 0.45)
+    await asyncio.to_thread(
+        audio_mixer.mix_with_music,
+        raw_path, music_path, final_path,
+        float(video_vol), float(music_vol),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+async def _build_metadata(
+    folder_name: str,
+    part_number: int,
+    total_parts: int,
+    target_duration: float,
+    youtube_settings: dict,
+    ai_settings: dict | None,
+) -> tuple[str, str, list[str]]:
+    default_title = youtube_settings.get(
+        "title_template", "{folder_name} - Bolum {part_number}"
+    ).format(folder_name=folder_name, part_number=part_number)
+    default_desc = youtube_settings.get("description", "") or ""
+    default_tags = list(youtube_settings.get("tags", []) or [])
+
+    if not ai_settings or not ai_settings.get("enabled"):
+        return default_title, default_desc, default_tags
+
+    meta = await ai_service.generate_metadata(
+        folder_name=folder_name,
+        part_number=part_number,
+        total_parts=total_parts,
+        duration_seconds=target_duration,
+        language=ai_settings.get("language", "tr"),
+        model=ai_settings.get("model"),
+    )
+    if not meta:
+        return default_title, default_desc, default_tags
+
+    description = meta.description
+    if ai_settings.get("append_default_description", True) and default_desc.strip():
+        description = f"{description}\n\n{default_desc}".strip()
+
+    merged: list[str] = []
+    for t in default_tags + meta.tags:
+        t_clean = t.strip()
+        if t_clean and t_clean.lower() not in {m.lower() for m in merged}:
+            merged.append(t_clean)
+        if len(merged) >= 25:
+            break
+
+    return meta.title, description, merged
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
+async def run_batch(
+    folder_path: str,
+    num_videos: int,
+    target_duration: float,
+    clip_duration: float,
+    photo_duration: float,
+    transition: str,
+    transition_duration: float,
+    shuffle: bool,
+    upload_to_youtube: bool,
+    youtube_settings: dict,
+    send_message,
+    cancel_event: asyncio.Event = None,
+    ai_settings: dict | None = None,
+    pro_settings: dict | None = None,
+):
+    await send_message({"type": "status", "message": "Klasor taraniyor..."})
+    scan_result = await asyncio.to_thread(scan_folder, folder_path)
+
+    if not scan_result["videos"] and not scan_result["photos"]:
+        raise RuntimeError("Klasorde video veya fotograf bulunamadi")
+
+    folder_name = scan_result["folder_name"]
+    await send_message({
+        "type": "scan_complete",
+        "folder_name": folder_name,
+        "video_count": scan_result["video_count"],
+        "photo_count": scan_result["photo_count"],
+        "total_duration": scan_result["total_video_duration"],
+    })
+
+    pro_enabled = bool(pro_settings and pro_settings.get("enabled"))
+    pro_meta: dict = {}
+    pro_music_pick: dict | None = None
+    pro_profile: dict | None = None
+
+    if pro_enabled:
+        plans, pro_meta, pro_music_pick = await _build_pro_plans(
+            scan_result, num_videos, target_duration, pro_settings, send_message,
+        )
+        pro_profile = pro_meta["profile"]
+        # Pro mode overrides transition defaults
+        transition = pro_profile["transition"]
+        transition_duration = pro_profile["transition_duration"]
+    else:
+        plans = plan_content_distribution(
+            videos=scan_result["videos"],
+            photos=scan_result["photos"],
+            num_videos=num_videos,
+            target_duration=target_duration,
+            clip_duration=clip_duration,
+            photo_duration=photo_duration,
+        )
+
+    ai_active = False
+    if ai_settings and ai_settings.get("enabled"):
+        ai_active = await ai_service.is_available()
+        if not ai_active:
+            await send_message({
+                "type": "ai_status",
+                "available": False,
+                "message": "Ollama bulunamadi, sablon basliklar kullanilacak.",
+            })
+        else:
+            await send_message({
+                "type": "ai_status",
+                "available": True,
+                "model": ai_settings.get("model") or ai_service.DEFAULT_MODEL,
+            })
+
+    await send_message({
+        "type": "started",
+        "total_videos": num_videos,
+        "folder_name": folder_name,
+    })
+
+    results = []
+    loop = asyncio.get_running_loop()
+    used_music: set[str] = set()
+    if pro_music_pick:
+        used_music.add(pro_music_pick["path"])
+
+    for i in range(num_videos):
+        if cancel_event and cancel_event.is_set():
+            await send_message({"type": "cancelled", "completed_count": len(results)})
+            return results
+
+        plan = plans[i]
+        if not plan:
+            await send_message({
+                "type": "video_status", "index": i, "status": "error",
+                "error": "Bu video icin yeterli icerik yok",
+            })
+            continue
+
+        title, description, tags = await _build_metadata(
+            folder_name=folder_name,
+            part_number=i + 1,
+            total_parts=num_videos,
+            target_duration=target_duration,
+            youtube_settings=youtube_settings,
+            ai_settings=ai_settings if ai_active else None,
+        )
+
+        await send_message({
+            "type": "video_status", "index": i, "status": "creating",
+            "title": title, "progress": 0,
+        })
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in folder_name)
+        output_path = str(EXPORTS_DIR / f"{safe_name}_B{i+1}_{timestamp}.mp4")
+
+        async def creation_progress(percent, idx=i):
+            await send_message({
+                "type": "video_status", "index": idx, "status": "creating",
+                "progress": round(percent, 1),
+            })
+
+        # Render to a raw path first so we can post-mix music if pro mode is on.
+        render_target = output_path
+        raw_path: str | None = None
+        music_for_this: dict | None = None
+        if pro_enabled and pro_profile and pro_settings.get("music_mode") != "none":
+            # Pick music per-video (first one was picked for beat analysis).
+            if i == 0 and pro_music_pick:
+                music_for_this = pro_music_pick
+            else:
+                music_for_this = _select_music(pro_profile, pro_settings, used=used_music)
+            if music_for_this:
+                used_music.add(music_for_this["path"])
+                raw_path = str(TEMP_DIR / f"batch_raw_{uuid.uuid4().hex[:8]}.mp4")
+                render_target = raw_path
+
+        try:
+            await create_batch_video(
+                content_plan=plan,
+                output_path=render_target,
+                transition=transition,
+                transition_duration=transition_duration,
+                progress_callback=creation_progress,
+            )
+
+            if raw_path and music_for_this and pro_profile:
+                await send_message({
+                    "type": "video_status", "index": i, "status": "creating",
+                    "progress": 88,
+                })
+                try:
+                    await _apply_music_track(
+                        raw_path=raw_path,
+                        final_path=output_path,
+                        music_path=music_for_this["path"],
+                        profile=pro_profile,
+                        overrides=pro_settings or {},
+                    )
+                finally:
+                    try:
+                        Path(raw_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+        except Exception as e:
+            await send_message({
+                "type": "video_status", "index": i, "status": "error",
+                "error": f"Video olusturma hatasi: {str(e)}",
+            })
+            continue
+
+        video_result = {
+            "index": i, "title": title,
+            "output_path": output_path, "youtube_url": "",
+        }
+
+        if upload_to_youtube:
+            await send_message({
+                "type": "video_status", "index": i, "status": "uploading",
+                "title": title, "progress": 0,
+            })
+
+            def progress_bridge(percent, idx=i):
+                fut = asyncio.run_coroutine_threadsafe(
+                    send_message({
+                        "type": "video_status", "index": idx,
+                        "status": "uploading", "progress": round(percent, 1),
+                    }),
+                    loop,
+                )
+                try:
+                    fut.result(timeout=5)
+                except Exception:
+                    pass
+
+            try:
+                youtube_url = await asyncio.to_thread(
+                    youtube_service.upload_video,
+                    file_path=output_path,
+                    title=title,
+                    description=description,
+                    tags=tags,
+                    privacy=youtube_settings.get("privacy", "private"),
+                    category_id=youtube_settings.get("category_id", "22"),
+                    progress_callback=progress_bridge,
+                )
+                video_result["youtube_url"] = youtube_url
+                await send_message({
+                    "type": "video_status", "index": i, "status": "completed",
+                    "title": title, "youtube_url": youtube_url,
+                    "output_path": output_path,
+                })
+            except Exception as e:
+                await send_message({
+                    "type": "video_status", "index": i, "status": "upload_error",
+                    "title": title, "error": f"YouTube yukleme hatasi: {str(e)}",
+                    "output_path": output_path,
+                })
+        else:
+            await send_message({
+                "type": "video_status", "index": i, "status": "completed",
+                "title": title, "output_path": output_path,
+            })
+
+        results.append(video_result)
+
+    await send_message({
+        "type": "batch_completed",
+        "total": num_videos,
+        "completed": len(results),
+        "results": results,
+    })
+    return results
