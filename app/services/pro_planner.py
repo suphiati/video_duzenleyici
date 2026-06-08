@@ -94,8 +94,25 @@ def _pick_candidate(scene: tuple[float, float], clip_length: tuple[float, float]
     return (round(clip_start, 2), round(clip_end, 2))
 
 
-def _score_candidate(scene: tuple[float, float], src_index: int, total: int) -> float:
-    """Heuristic scoring: longer scenes + mid-file position get a bump."""
+def _luminance_score(lum: float | None) -> float:
+    """Prefer well-exposed scenes; penalise very dark or blown-out frames.
+
+    ``lum`` is a 0-255 mean luminance; None (unknown) scores neutral.
+    """
+    if lum is None:
+        return 0.5
+    if lum <= 25 or lum >= 235:
+        return 0.1
+    if 60 <= lum <= 180:
+        return 1.0
+    if lum < 60:
+        return 0.1 + (lum - 25) / (60 - 25) * 0.9
+    return 0.1 + (235 - lum) / (235 - 180) * 0.9
+
+
+def _score_candidate(scene: tuple[float, float], src_index: int, total: int,
+                     luminance: float | None = None) -> float:
+    """Heuristic scoring: longer scenes, mid-file position, good exposure."""
     s_start, s_end = scene
     s_dur = s_end - s_start
 
@@ -116,22 +133,25 @@ def _score_candidate(scene: tuple[float, float], src_index: int, total: int) -> 
         rel = src_index / (total - 1)
         pos_score = 1.0 - abs(rel - 0.5) * 0.6
 
-    return round(dur_score * 0.7 + pos_score * 0.3, 3)
+    lum_score = _luminance_score(luminance)
+
+    return round(dur_score * 0.55 + pos_score * 0.2 + lum_score * 0.25, 3)
 
 
 def build_candidates(videos: list[dict]) -> list[dict]:
     """Run scene detection per video and return flat candidate list."""
     candidates: list[dict] = []
     for idx, v in enumerate(videos):
-        scenes = scene_detector.detect_scenes(v["path"], v["duration"])
-        for scene in scenes:
-            s_dur = scene[1] - scene[0]
+        scenes = scene_detector.detect_scenes_detailed(v["path"], v["duration"])
+        for sc in scenes:
+            s_dur = sc["end"] - sc["start"]
             if s_dur < 1.5:
                 continue
+            scene = (sc["start"], sc["end"])
             candidates.append({
                 "path": v["path"],
                 "scene": scene,
-                "score": _score_candidate(scene, idx, len(videos)),
+                "score": _score_candidate(scene, idx, len(videos), sc.get("luminance")),
                 "video_index": idx,
             })
     return candidates

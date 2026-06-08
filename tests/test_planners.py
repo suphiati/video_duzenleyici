@@ -68,11 +68,16 @@ def test_interleave_without_photos_is_identity():
 # --------------------------------------------------------------------------
 
 def _fake_scenes(path, duration, threshold=0.35, min_duration=1.5):
-    return [(0.0, 5.0), (5.0, 10.0), (10.0, 15.0), (15.0, 20.0)]
+    return [
+        {"start": 0.0, "end": 5.0, "luminance": 120},
+        {"start": 5.0, "end": 10.0, "luminance": 120},
+        {"start": 10.0, "end": 15.0, "luminance": 120},
+        {"start": 15.0, "end": 20.0, "luminance": 120},
+    ]
 
 
 def test_build_plans_basic(monkeypatch):
-    monkeypatch.setattr(scene_detector, "detect_scenes", _fake_scenes)
+    monkeypatch.setattr(scene_detector, "detect_scenes_detailed", _fake_scenes)
     random.seed(1)
     plans, meta = pro_planner.build_plans(
         videos=make_videos(2, 20.0), photos=make_photos(2),
@@ -87,7 +92,7 @@ def test_build_plans_basic(monkeypatch):
 
 
 def test_build_plans_unknown_style_falls_back_to_auto(monkeypatch):
-    monkeypatch.setattr(scene_detector, "detect_scenes", _fake_scenes)
+    monkeypatch.setattr(scene_detector, "detect_scenes_detailed", _fake_scenes)
     random.seed(2)
     _, meta = pro_planner.build_plans(
         videos=make_videos(1, 20.0), photos=[],
@@ -98,8 +103,10 @@ def test_build_plans_unknown_style_falls_back_to_auto(monkeypatch):
 
 def test_build_candidates_skips_tiny_scenes(monkeypatch):
     def tiny(path, duration, threshold=0.35, min_duration=1.5):
-        return [(0.0, 0.5), (0.5, 6.0)]  # first scene < 1.5s should be dropped
-    monkeypatch.setattr(scene_detector, "detect_scenes", tiny)
+        # first scene < 1.5s should be dropped
+        return [{"start": 0.0, "end": 0.5, "luminance": 100},
+                {"start": 0.5, "end": 6.0, "luminance": 100}]
+    monkeypatch.setattr(scene_detector, "detect_scenes_detailed", tiny)
     cands = pro_planner.build_candidates(make_videos(1, 6.0))
     assert len(cands) == 1
     assert cands[0]["scene"] == (0.5, 6.0)
@@ -135,7 +142,7 @@ async def test_preview_plans_legacy(monkeypatch):
 async def test_preview_plans_pro(monkeypatch):
     scan = _fake_scan(make_videos(2, 20.0), [])
     monkeypatch.setattr(batch_service, "scan_folder", lambda p: scan)
-    monkeypatch.setattr(scene_detector, "detect_scenes", _fake_scenes)
+    monkeypatch.setattr(scene_detector, "detect_scenes_detailed", _fake_scenes)
     random.seed(3)
     out = await batch_service.preview_plans(
         folder_path="X", num_videos=2, target_duration=15.0,
@@ -154,3 +161,32 @@ async def test_preview_plans_empty_folder_raises(monkeypatch):
             folder_path="X", num_videos=1, target_duration=10.0,
             clip_duration=4.0, photo_duration=3.0, pro_settings=None,
         )
+
+
+# --------------------------------------------------------------------------
+# Content-aware scoring + scene cache format
+# --------------------------------------------------------------------------
+
+def test_score_prefers_well_exposed_scene():
+    scene = (0.0, 6.0)
+    dark = pro_planner._score_candidate(scene, 0, 1, luminance=10)
+    good = pro_planner._score_candidate(scene, 0, 1, luminance=120)
+    blown = pro_planner._score_candidate(scene, 0, 1, luminance=250)
+    assert good > dark
+    assert good > blown
+
+
+def test_score_unknown_luminance_is_neutral():
+    s = pro_planner._score_candidate((0.0, 6.0), 0, 1, luminance=None)
+    assert 0.0 <= s <= 1.0
+
+
+def test_scene_cache_backward_compat():
+    # Old 2-element cache entries -> luminance None; new 3-element -> value.
+    old = scene_detector._to_dicts([[0.0, 5.0], [5.0, 10.0]])
+    assert old[0] == {"start": 0.0, "end": 5.0, "luminance": None}
+    new = scene_detector._to_dicts([[0.0, 5.0, 120]])
+    assert new[0]["luminance"] == 120
+    assert scene_detector._to_cache(
+        [{"start": 1.0, "end": 2.0, "luminance": 90}]
+    ) == [[1.0, 2.0, 90]]

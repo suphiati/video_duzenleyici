@@ -106,8 +106,18 @@
                         oninput="document.getElementById('clipSaturationLabel').textContent=this.value"
                         onchange="app.updateClipProp()">
                 </div>
+                <h3 style="margin-top:10px">Donusum</h3>
                 <div class="prop-row">
-                    <button onclick="app.resetClipColor()">Renkleri Sifirla</button>
+                    <label><input type="checkbox" id="clipHflip" onchange="app.updateClipProp()"> Yatay cevir (ayna)</label>
+                </div>
+                <div class="prop-row">
+                    <label>Hiz <span id="clipSpeedLabel">1</span>x</label>
+                    <input type="range" id="clipSpeed" min="0.5" max="2" step="0.05" value="1"
+                        oninput="document.getElementById('clipSpeedLabel').textContent=this.value"
+                        onchange="app.updateClipProp()">
+                </div>
+                <div class="prop-row">
+                    <button onclick="app.resetClipEffects()">Efektleri Sifirla</button>
                 </div>
             </div>
             <div class="prop-section" id="audioPropsSection" style="display:none">

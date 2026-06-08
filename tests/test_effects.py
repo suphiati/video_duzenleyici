@@ -1,6 +1,6 @@
-"""Unit tests for per-clip colour-effect helpers (pure, no ffmpeg)."""
+"""Unit tests for per-clip colour/transform helpers (pure, no ffmpeg)."""
 
-from app.services.ffmpeg_service import _clip_has_effects, _eq_filter
+from app.services.ffmpeg_service import _clip_has_effects, _eq_filter, _atempo_chain
 
 
 def test_neutral_clip_has_no_effects():
@@ -32,3 +32,25 @@ def test_contrast_and_saturation_in_filter():
     f = _eq_filter({"brightness": 0.0, "contrast": 1.3, "saturation": 0.5})
     assert "contrast=1.300" in f
     assert "saturation=0.500" in f
+
+
+def test_hflip_triggers_effects():
+    assert _clip_has_effects({"hflip": True})
+    assert not _clip_has_effects({"hflip": False})
+
+
+def test_speed_triggers_effects():
+    assert _clip_has_effects({"speed": 1.5})
+    assert not _clip_has_effects({"speed": 1.0})
+
+
+def test_atempo_chain_single_stage():
+    assert _atempo_chain(1.5) == "atempo=1.5000"
+
+
+def test_atempo_chain_decomposes_fast():
+    assert _atempo_chain(3.0) == "atempo=2.0000,atempo=1.5000"
+
+
+def test_atempo_chain_decomposes_slow():
+    assert _atempo_chain(0.25) == "atempo=0.5000,atempo=0.5000"

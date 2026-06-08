@@ -399,6 +399,9 @@ app.selectClip = (clipId) => {
         $('clipBrightness').value = b; $('clipBrightnessLabel').textContent = b;
         $('clipContrast').value = c; $('clipContrastLabel').textContent = c;
         $('clipSaturation').value = s; $('clipSaturationLabel').textContent = s;
+        $('clipHflip').checked = !!clip.hflip;
+        const sp = clip.speed ?? 1;
+        $('clipSpeed').value = sp; $('clipSpeedLabel').textContent = sp;
         app.previewMedia(clip.media_path, 'video');
     }
     renderTimeline();
@@ -428,6 +431,9 @@ app.updateClipProp = async () => {
         let c = parseFloat($('clipContrast').value); if (isNaN(c)) c = 1;
         let s = parseFloat($('clipSaturation').value); if (isNaN(s)) s = 1;
         clip.brightness = b; clip.contrast = c; clip.saturation = s;
+        clip.hflip = $('clipHflip').checked;
+        let sp = parseFloat($('clipSpeed').value); if (isNaN(sp) || sp <= 0) sp = 1;
+        clip.speed = sp;
         try {
             const data = await api.updateClip(state.project.id, clip.id, clip);
             state.project = data;
@@ -437,10 +443,12 @@ app.updateClipProp = async () => {
     }
 };
 
-app.resetClipColor = () => {
+app.resetClipEffects = () => {
     $('clipBrightness').value = 0; $('clipBrightnessLabel').textContent = '0';
     $('clipContrast').value = 1; $('clipContrastLabel').textContent = '1';
     $('clipSaturation').value = 1; $('clipSaturationLabel').textContent = '1';
+    $('clipHflip').checked = false;
+    $('clipSpeed').value = 1; $('clipSpeedLabel').textContent = '1';
     app.updateClipProp();
 };
 

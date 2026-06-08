@@ -67,13 +67,34 @@ def segment_encoder_args(crf: int = 20) -> list[str]:
     return ["-c:v", "libx264", "-preset", "fast", "-crf", str(crf)]
 
 
+def _clip_num(clip: dict, key: str, default: float) -> float:
+    v = clip.get(key, default)
+    return float(v) if v is not None else default
+
+
 def _clip_has_effects(clip: dict) -> bool:
-    """True if the clip carries a non-neutral colour adjustment."""
+    """True if the clip carries a non-neutral colour/transform adjustment."""
     return (
-        abs(float(clip.get("brightness", 0.0) or 0.0)) > 1e-3
-        or abs(float(clip.get("contrast", 1.0) if clip.get("contrast") is not None else 1.0) - 1.0) > 1e-3
-        or abs(float(clip.get("saturation", 1.0) if clip.get("saturation") is not None else 1.0) - 1.0) > 1e-3
+        abs(_clip_num(clip, "brightness", 0.0)) > 1e-3
+        or abs(_clip_num(clip, "contrast", 1.0) - 1.0) > 1e-3
+        or abs(_clip_num(clip, "saturation", 1.0) - 1.0) > 1e-3
+        or bool(clip.get("hflip"))
+        or abs(_clip_num(clip, "speed", 1.0) - 1.0) > 1e-3
     )
+
+
+def _atempo_chain(speed: float) -> str:
+    """Build an atempo filter chain. atempo only accepts 0.5..2.0 per stage."""
+    factors = []
+    s = speed
+    while s > 2.0 + 1e-6:
+        factors.append(2.0)
+        s /= 2.0
+    while s < 0.5 - 1e-6:
+        factors.append(0.5)
+        s /= 0.5
+    factors.append(s)
+    return ",".join(f"atempo={f:.4f}" for f in factors)
 
 
 def _eq_filter(clip: dict) -> str | None:
@@ -87,31 +108,41 @@ def _eq_filter(clip: dict) -> str | None:
 
 
 def _encode_clip_normalized(clip: dict, output_path: str, w: str, h: str, settings: dict):
-    """Trim + optional colour eq + normalise to target res/codec.
+    """Trim + optional colour eq / hflip / speed + normalise to target res/codec.
 
     Used only when at least one clip has effects, so all clips share identical
-    codec params and the demuxer concat stays valid.
+    codec params and the demuxer concat stays valid. ``-ss``/``-t`` are input
+    options so the source window is selected before any speed change.
     """
     in_point = float(clip.get("in_point", 0) or 0)
     out_point = float(clip.get("out_point", -1) if clip.get("out_point") is not None else -1)
+    speed = _clip_num(clip, "speed", 1.0)
+    if speed <= 0:
+        speed = 1.0
+    changed_speed = abs(speed - 1.0) > 1e-3
 
     vf = []
     eq = _eq_filter(clip)
     if eq:
         vf.append(eq)
+    if clip.get("hflip"):
+        vf.append("hflip")
     vf.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease")
     vf.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
     vf.append("setsar=1")
     vf.append(f"format={settings['pixel_format']}")
+    if changed_speed:
+        vf.append(f"setpts=PTS/{speed:.4f}")
 
     cmd = [FFMPEG_BIN, "-y"]
     if in_point > 0:
         cmd += ["-ss", str(in_point)]
-    cmd += ["-i", clip["media_path"]]
     if out_point > 0:
         cmd += ["-t", str(out_point - in_point)]
+    cmd += ["-i", clip["media_path"], "-vf", ",".join(vf)]
+    if changed_speed:
+        cmd += ["-af", _atempo_chain(speed)]
     cmd += [
-        "-vf", ",".join(vf),
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "192k", "-ar", str(settings["audio_sample_rate"]), "-ac", "2",
         "-movflags", "+faststart",

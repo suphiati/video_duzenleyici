@@ -13,6 +13,9 @@ class Clip(BaseModel):
     brightness: float = 0.0   # -1.0 .. 1.0  (0 = unchanged)
     contrast: float = 1.0     #  0.0 .. 2.0  (1 = unchanged)
     saturation: float = 1.0   #  0.0 .. 3.0  (1 = unchanged)
+    # Per-clip transforms (applied at export)
+    hflip: bool = False       # mirror horizontally
+    speed: float = 1.0        # 0.5 .. 2.0  (1 = normal; >1 faster)
 
 
 class AudioTrack(BaseModel):

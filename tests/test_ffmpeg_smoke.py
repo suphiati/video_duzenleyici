@@ -91,6 +91,16 @@ def test_mix_with_music(media):
 
 
 @skip_no_ffmpeg
+def test_detect_scenes_detailed_shape(media):
+    from app.services import scene_detector
+    scenes = scene_detector.detect_scenes_detailed(media["clips"][0], 2.0)
+    assert isinstance(scenes, list) and scenes
+    for s in scenes:
+        assert {"start", "end", "luminance"} <= set(s.keys())
+    assert scenes[0]["start"] == 0.0
+
+
+@skip_no_ffmpeg
 async def test_export_project_with_color_effect(media, tmp_path):
     """The any-effects path re-encodes the clip with an eq filter applied."""
     from app.services.ffmpeg_service import export_project
@@ -103,6 +113,22 @@ async def test_export_project_with_color_effect(media, tmp_path):
     await export_project(clips=clips, audio_tracks=[], subtitles=[], output_path=out)
     assert Path(out).exists()
     assert ffmpeg_service._get_duration(out) > 0
+
+
+@skip_no_ffmpeg
+async def test_export_project_with_transform(media, tmp_path):
+    """hflip + 2x speed: output should be roughly half the source duration."""
+    from app.services.ffmpeg_service import export_project
+
+    clips = [{
+        "media_path": media["clips"][0], "in_point": 0.0, "out_point": 2.0,
+        "hflip": True, "speed": 2.0,
+    }]
+    out = str(tmp_path / "export_tf.mp4")
+    await export_project(clips=clips, audio_tracks=[], subtitles=[], output_path=out)
+    assert Path(out).exists()
+    d = ffmpeg_service._get_duration(out)
+    assert 0.5 < d < 1.8  # ~1s from a 2s source at 2x
 
 
 @skip_no_ffmpeg
