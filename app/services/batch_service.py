@@ -1,5 +1,6 @@
 import asyncio
 import math
+import os
 import shutil
 import subprocess
 import uuid
@@ -22,6 +23,73 @@ from app.services import (
     beat_analyzer,
     audio_mixer,
 )
+
+
+# ---------------------------------------------------------------------------
+# Plan preview (no rendering) — reuses the planners for a dry-run summary
+# ---------------------------------------------------------------------------
+
+async def preview_plans(
+    folder_path: str,
+    num_videos: int,
+    target_duration: float,
+    clip_duration: float,
+    photo_duration: float,
+    pro_settings: dict | None = None,
+) -> dict:
+    """Scan + plan without encoding, returning a per-output segment summary.
+
+    Pro mode still runs scene detection (cached), but nothing is rendered.
+    """
+    scan_result = await asyncio.to_thread(scan_folder, folder_path)
+    if not scan_result["videos"] and not scan_result["photos"]:
+        raise RuntimeError("Klasorde video veya fotograf bulunamadi")
+
+    pro_enabled = bool(pro_settings and pro_settings.get("enabled"))
+    if pro_enabled:
+        style = pro_settings.get("style", "auto")
+        plans, meta = await asyncio.to_thread(
+            pro_planner.build_plans,
+            scan_result["videos"], scan_result["photos"],
+            num_videos, target_duration, style, None, None,
+        )
+        mode = f"pro:{meta['style']}"
+    else:
+        plans = plan_content_distribution(
+            videos=scan_result["videos"], photos=scan_result["photos"],
+            num_videos=num_videos, target_duration=target_duration,
+            clip_duration=clip_duration, photo_duration=photo_duration,
+        )
+        mode = "legacy"
+
+    videos_summary = []
+    for i, plan in enumerate(plans):
+        items = []
+        total = 0.0
+        for it in plan:
+            if it["type"] == "video":
+                dur = round(it["end"] - it["start"], 2)
+                items.append({"type": "video", "name": Path(it["path"]).name,
+                              "start": it["start"], "end": it["end"], "duration": dur})
+            else:
+                dur = round(it.get("duration", 0.0), 2)
+                items.append({"type": "photo", "name": Path(it["path"]).name,
+                              "duration": dur})
+            total += dur
+        videos_summary.append({
+            "index": i,
+            "item_count": len(items),
+            "total_duration": round(total, 1),
+            "items": items,
+        })
+
+    return {
+        "mode": mode,
+        "folder_name": scan_result["folder_name"],
+        "video_count": scan_result["video_count"],
+        "photo_count": scan_result["photo_count"],
+        "videos": videos_summary,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +263,19 @@ def _encode_photo_segment(item: dict, temp_path: str) -> bool:
         return False
 
 
+def _segment_concurrency() -> int:
+    """How many segment encodes to run at once.
+
+    A GPU encoder is a single hardware session, so keep it serial. On CPU,
+    libx264 is already multithreaded — use a small pool to overlap process
+    startup without oversubscribing the cores.
+    """
+    from app.services.ffmpeg_service import detect_gpu_encoder
+    if detect_gpu_encoder():
+        return 1
+    return max(1, min(3, (os.cpu_count() or 2) // 2))
+
+
 class BatchCancelled(Exception):
     """Raised when a cancel is requested mid-render."""
 
@@ -221,32 +302,45 @@ async def create_batch_video(
 
     try:
         total_items = len(content_plan)
+        sem = asyncio.Semaphore(_segment_concurrency())
+        rendered_by_index: dict[int, str] = {}
+        progress_state = {"done": 0, "dropped": 0}
 
-        for i, item in enumerate(content_plan):
+        async def _encode_item(idx: int, plan_item: dict):
             if cancel_event and cancel_event.is_set():
                 raise BatchCancelled()
-            if item["type"] == "video":
-                temp_path = str(TEMP_DIR / f"batch_{batch_id}_seg_{i}.mp4")
-                temp_files.append(temp_path)
-                ok = await asyncio.to_thread(_encode_video_segment, item, temp_path, w, h)
-                if not ok:
-                    temp_files.pop()
-                    dropped += 1
-                    continue
-                temp_clips.append(temp_path)
-            elif item["type"] == "photo":
-                temp_path = str(TEMP_DIR / f"batch_{batch_id}_photo_{i}.mp4")
-                temp_files.append(temp_path)
-                ok = await asyncio.to_thread(_encode_photo_segment, item, temp_path)
-                if not ok:
-                    temp_files.pop()
-                    dropped += 1
-                    continue
-                temp_clips.append(temp_path)
-
+            async with sem:
+                if cancel_event and cancel_event.is_set():
+                    raise BatchCancelled()
+                if plan_item["type"] == "video":
+                    tp = str(TEMP_DIR / f"batch_{batch_id}_seg_{idx}.mp4")
+                    ok = await asyncio.to_thread(_encode_video_segment, plan_item, tp, w, h)
+                elif plan_item["type"] == "photo":
+                    tp = str(TEMP_DIR / f"batch_{batch_id}_photo_{idx}.mp4")
+                    ok = await asyncio.to_thread(_encode_photo_segment, plan_item, tp)
+                else:
+                    return
+                if ok:
+                    temp_files.append(tp)
+                    rendered_by_index[idx] = tp
+                else:
+                    progress_state["dropped"] += 1
+            progress_state["done"] += 1
             if progress_callback:
-                percent = ((i + 1) / total_items) * 75
-                await progress_callback(percent)
+                await progress_callback((progress_state["done"] / max(1, total_items)) * 75)
+
+        tasks = [asyncio.create_task(_encode_item(i, item))
+                 for i, item in enumerate(content_plan)]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            raise
+
+        dropped = progress_state["dropped"]
+        # Concat in original plan order regardless of completion order.
+        temp_clips = [rendered_by_index[i] for i in sorted(rendered_by_index)]
 
         if not temp_clips:
             raise RuntimeError("Hicbir klip olusturulamadi")

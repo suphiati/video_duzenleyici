@@ -127,3 +127,19 @@ async def list_exports():
             "created": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
         })
     return {"exports": sorted(exports, key=lambda x: x["created"], reverse=True)}
+
+
+@router.delete("/delete")
+async def delete_export(path: str):
+    """Delete one rendered output. Restricted to files under EXPORTS_DIR."""
+    p = Path(path).resolve()
+    exports_root = EXPORTS_DIR.resolve()
+    if exports_root not in p.parents:
+        raise HTTPException(400, "Sadece cikti klasorundeki dosyalar silinebilir")
+    if not p.exists():
+        raise HTTPException(404, "Dosya bulunamadi")
+    try:
+        p.unlink()
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(500, f"Silme hatasi: {e}")

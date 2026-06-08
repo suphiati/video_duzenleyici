@@ -22,6 +22,7 @@
                 <button onclick="app.showSlideshowDialog()">Slayt Gosterisi</button>
                 <button onclick="app.showVideoMixDialog()">Video Mix</button>
                 <button onclick="app.showBatchDialog()">Toplu Video</button>
+                <button onclick="app.showOutputsDialog()">Ciktilar</button>
                 <button class="primary" onclick="app.startExport()">Disa Aktar</button>
             </div>
         </header>
@@ -115,6 +116,8 @@
             <div class="timeline-toolbar">
                 <span class="label">Zaman Cizelgesi</span>
                 <span class="spacer"></span>
+                <button onclick="app.zoomTimeline(-1)" title="Uzaklastir">&minus;</button>
+                <button onclick="app.zoomTimeline(1)" title="Yakinlastir">+</button>
                 <button onclick="app.addMusicDialog()">+ Muzik</button>
             </div>
             <div class="timeline-tracks">

@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse
 from app.models.batch import BatchRequest, ScanRequest
 from app.services.folder_scanner import scan_folder
 from app.services import youtube_service, ai_service, beat_analyzer, music_library
-from app.services.batch_service import run_batch
+from app.services.batch_service import run_batch, preview_plans
 from app.services.pro_planner import STYLE_PROFILES
 
 router = APIRouter()
@@ -127,6 +127,27 @@ async def scan_folder_endpoint(req: ScanRequest):
         return await asyncio.to_thread(scan_folder, folder)
     except Exception as e:
         raise HTTPException(500, f"Klasor tarama hatasi: {e}")
+
+
+@router.post("/plan-preview")
+async def plan_preview(req: BatchRequest):
+    """Dry-run the planner (no encoding) and return the planned segments."""
+    folder = os.path.normpath(req.folder_path)
+    if not Path(folder).exists() or not Path(folder).is_dir():
+        raise HTTPException(404, f"Klasor bulunamadi: {req.folder_path}")
+    try:
+        return await preview_plans(
+            folder_path=folder,
+            num_videos=req.num_videos,
+            target_duration=req.target_duration,
+            clip_duration=req.clip_duration,
+            photo_duration=req.photo_duration,
+            pro_settings=req.pro_settings.model_dump(),
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Plan onizleme hatasi: {e}")
 
 
 @router.websocket("/ws")

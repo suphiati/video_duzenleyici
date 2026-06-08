@@ -7,6 +7,8 @@ planning logic is exercised in isolation.
 
 import random
 
+import pytest
+
 from app.services import batch_service, pro_planner, scene_detector
 
 from conftest import make_videos, make_photos
@@ -101,3 +103,54 @@ def test_build_candidates_skips_tiny_scenes(monkeypatch):
     cands = pro_planner.build_candidates(make_videos(1, 6.0))
     assert len(cands) == 1
     assert cands[0]["scene"] == (0.5, 6.0)
+
+
+# --------------------------------------------------------------------------
+# Plan preview (scan + planners monkeypatched, no rendering)
+# --------------------------------------------------------------------------
+
+def _fake_scan(videos, photos, name="Trip"):
+    return {
+        "videos": videos, "photos": photos, "folder_name": name,
+        "video_count": len(videos), "photo_count": len(photos),
+        "total_video_duration": sum(v["duration"] for v in videos),
+    }
+
+
+@pytest.mark.asyncio
+async def test_preview_plans_legacy(monkeypatch):
+    scan = _fake_scan(make_videos(2, 30.0), make_photos(1))
+    monkeypatch.setattr(batch_service, "scan_folder", lambda p: scan)
+    out = await batch_service.preview_plans(
+        folder_path="X", num_videos=2, target_duration=15.0,
+        clip_duration=4.0, photo_duration=3.0, pro_settings={"enabled": False},
+    )
+    assert out["mode"] == "legacy"
+    assert out["folder_name"] == "Trip"
+    assert len(out["videos"]) == 2
+    assert all("items" in v and "total_duration" in v for v in out["videos"])
+
+
+@pytest.mark.asyncio
+async def test_preview_plans_pro(monkeypatch):
+    scan = _fake_scan(make_videos(2, 20.0), [])
+    monkeypatch.setattr(batch_service, "scan_folder", lambda p: scan)
+    monkeypatch.setattr(scene_detector, "detect_scenes", _fake_scenes)
+    random.seed(3)
+    out = await batch_service.preview_plans(
+        folder_path="X", num_videos=2, target_duration=15.0,
+        clip_duration=4.0, photo_duration=3.0,
+        pro_settings={"enabled": True, "style": "auto"},
+    )
+    assert out["mode"] == "pro:auto"
+    assert len(out["videos"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_preview_plans_empty_folder_raises(monkeypatch):
+    monkeypatch.setattr(batch_service, "scan_folder", lambda p: _fake_scan([], []))
+    with pytest.raises(RuntimeError):
+        await batch_service.preview_plans(
+            folder_path="X", num_videos=1, target_duration=10.0,
+            clip_duration=4.0, photo_duration=3.0, pro_settings=None,
+        )

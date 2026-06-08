@@ -88,3 +88,25 @@ def test_mix_with_music(media):
     )
     assert Path(out).exists()
     assert ffmpeg_service._get_duration(out) > 0
+
+
+@skip_no_ffmpeg
+async def test_create_batch_video_parallel_orders_and_concats(media, tmp_path):
+    """End-to-end: parallel segment encode + order-preserving concat."""
+    from app.services import batch_service
+
+    src = media["clips"][0]  # ~2s clip
+    plan = [
+        {"type": "video", "path": src, "start": 0.0, "end": 1.0},
+        {"type": "video", "path": src, "start": 0.5, "end": 1.5},
+        {"type": "video", "path": src, "start": 1.0, "end": 2.0},
+    ]
+    out = str(tmp_path / "batch_out.mp4")
+    stats = await batch_service.create_batch_video(
+        content_plan=plan, output_path=out,
+        transition="none", transition_duration=0.5, resolution="320x240",
+    )
+    assert Path(out).exists()
+    assert stats["rendered"] == 3
+    assert stats["dropped"] == 0
+    assert ffmpeg_service._get_duration(out) > 1.5

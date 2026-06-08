@@ -30,6 +30,7 @@
     overflow-x: auto;
     overflow-y: auto;
     padding: 8px 12px;
+    --clip-w: 90px;   /* per-block width; adjusted by the zoom buttons */
 }
 
 .track {
@@ -37,6 +38,8 @@
     align-items: center;
     min-height: 48px;
     margin-bottom: 4px;
+    width: max-content;     /* grow with content so the tracks can scroll */
+    min-width: 100%;
 }
 .track-label {
     width: 80px;
@@ -45,9 +48,13 @@
     text-transform: uppercase;
     flex-shrink: 0;
     padding-right: 8px;
+    position: sticky;       /* keep labels visible while scrolling */
+    left: 0;
+    z-index: 2;
+    background: var(--bg-secondary);
 }
 .track-content {
-    flex: 1;
+    flex: 1 0 auto;
     display: flex;
     gap: 3px;
     min-height: 44px;
@@ -60,7 +67,8 @@
 /* Clips */
 .clip-block {
     height: 38px;
-    min-width: 60px;
+    flex: 0 0 auto;
+    width: var(--clip-w, 90px);
     background: var(--bg-tertiary);
     border-radius: var(--radius-sm);
     display: flex;
@@ -120,7 +128,8 @@
 /* Audio track blocks */
 .audio-block {
     height: 32px;
-    min-width: 80px;
+    flex: 0 0 auto;
+    width: var(--clip-w, 90px);
     background: linear-gradient(135deg, #1e5f3a, #2a7e4a);
     border-radius: var(--radius-sm);
     display: flex;
@@ -156,7 +165,8 @@
 /* Subtitle track */
 .subtitle-block {
     height: 28px;
-    min-width: 50px;
+    flex: 0 0 auto;
+    width: var(--clip-w, 90px);
     background: linear-gradient(135deg, #5f5f1e, #7e7e2a);
     border-radius: var(--radius-sm);
     display: flex;

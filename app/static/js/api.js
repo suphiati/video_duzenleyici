@@ -47,6 +47,7 @@ export const api = {
     // Export
     exportWsUrl: (projectId) => `ws://${location.host}/api/export/ws/${projectId}`,
     listExports: () => request('/api/export/list'),
+    deleteExport: (path) => request(`/api/export/delete?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
 
     // Slideshow
     createSlideshow: (data) => request('/api/slideshow/create', { method: 'POST', body: JSON.stringify(data) }),
@@ -56,6 +57,7 @@ export const api = {
 
     // Batch
     batchScan: (folderPath) => request('/api/batch/scan', { method: 'POST', body: JSON.stringify({ folder_path: folderPath }) }),
+    batchPlanPreview: (payload) => request('/api/batch/plan-preview', { method: 'POST', body: JSON.stringify(payload) }),
     batchWsUrl: () => `ws://${location.host}/api/batch/ws`,
     youtubeStatus: () => request('/api/batch/youtube/status'),
     youtubeAuthUrl: () => request('/api/batch/youtube/auth-url'),

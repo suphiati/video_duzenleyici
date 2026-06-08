@@ -361,6 +361,14 @@ function renderTimeline() {
     renderSubtitleList();
 }
 
+app.zoomTimeline = (dir) => {
+    const tracks = document.querySelector('.timeline-tracks');
+    if (!tracks) return;
+    const cur = parseInt(getComputedStyle(tracks).getPropertyValue('--clip-w')) || 90;
+    const next = Math.max(50, Math.min(260, cur + dir * 30));
+    tracks.style.setProperty('--clip-w', next + 'px');
+};
+
 function initSortable(el) {
     if (el._sortable) el._sortable.destroy();
     el._sortable = new Sortable(el, {
@@ -919,6 +927,57 @@ app.createVideoMix = async () => {
     }
 };
 
+// ─── Outputs (rendered exports) ───
+let _outputsCache = [];
+
+app.showOutputsDialog = () => {
+    showModal('Ciktilar', '<div id="outputsList" style="max-height:50vh;overflow-y:auto">Yukleniyor...</div>', [
+        { text: 'Yenile', class: '', onclick: 'app.refreshOutputs()' },
+        { text: 'Kapat', class: '', onclick: 'closeModal()' },
+    ]);
+    app.refreshOutputs();
+};
+
+app.refreshOutputs = async () => {
+    const el = document.getElementById('outputsList');
+    if (!el) return;
+    try {
+        const data = await api.listExports();
+        _outputsCache = data.exports || [];
+        if (!_outputsCache.length) {
+            el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px">Henuz cikti yok. Disa Aktar veya Toplu Video ile olusturun.</div>';
+            return;
+        }
+        el.innerHTML = _outputsCache.map((f, i) => `
+            <div style="display:flex;align-items:center;gap:8px;padding:6px;border-bottom:1px solid var(--border);font-size:12px">
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escAttr(f.path)}">${escHtml(f.name)}</span>
+                <span style="color:var(--text-muted)">${formatSize(f.size)}</span>
+                <button onclick="app.playOutput(${i})">Oynat</button>
+                <button style="background:var(--danger)" onclick="app.deleteOutput(${i})">Sil</button>
+            </div>`).join('');
+    } catch (e) {
+        el.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message)}</span>`;
+    }
+};
+
+app.playOutput = (i) => {
+    const f = _outputsCache[i];
+    if (f) window.open(api.streamUrl(f.path), '_blank');
+};
+
+app.deleteOutput = async (i) => {
+    const f = _outputsCache[i];
+    if (!f) return;
+    if (!confirm(`"${f.name}" silinsin mi?`)) return;
+    try {
+        await api.deleteExport(f.path);
+        toast('Cikti silindi', 'success');
+        app.refreshOutputs();
+    } catch (e) {
+        toast('Silinemedi: ' + e.message, 'error');
+    }
+};
+
 // ─── Batch Video Dialog ───
 app.showBatchDialog = () => {
     const html = `
@@ -933,6 +992,7 @@ app.showBatchDialog = () => {
                     value="${escAttr(state.currentPath || '')}">
                 <button onclick="app.batchUseBrowser()" title="Dosya gezginindeki klasoru kullan">Secili</button>
                 <button onclick="app.batchScanFolder()">Tara</button>
+                <button onclick="app.batchPreviewPlan()" title="Render etmeden plani goster">Plan onizle</button>
             </div>
         </div>
         <div id="batchScanResult" style="display:none;padding:8px;background:var(--bg-lighter);border-radius:4px;margin-bottom:8px;font-size:12px"></div>
@@ -1149,6 +1209,47 @@ app.batchScanFolder = async () => {
             ${data.video_count} video | ${data.photo_count} fotograf |
             Toplam sure: ${durMin}dk ${durSec}sn
         `;
+    } catch (e) {
+        resultDiv.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message)}</span>`;
+    }
+};
+
+app.batchPreviewPlan = async () => {
+    const folderPath = document.getElementById('batchFolderPath')?.value;
+    if (!folderPath) {
+        toast('Klasor yolu giriniz', 'error');
+        return;
+    }
+    const resultDiv = document.getElementById('batchScanResult');
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = 'Plan hesaplaniyor... (sahne tespiti ilk seferde surebilir)';
+    const payload = {
+        folder_path: folderPath,
+        num_videos: parseInt(document.getElementById('batchNumVideos')?.value) || 5,
+        target_duration: parseFloat(document.getElementById('batchDuration')?.value) || 300,
+        clip_duration: parseFloat(document.getElementById('batchClipDuration')?.value) || 5,
+        photo_duration: parseFloat(document.getElementById('batchPhotoDuration')?.value) || 4,
+        pro_settings: {
+            enabled: document.getElementById('batchProEnabled')?.checked ?? false,
+            style: document.getElementById('batchProStyle')?.value || 'auto',
+        },
+    };
+    try {
+        const data = await api.batchPlanPreview(payload);
+        const rows = data.videos.map(v => {
+            const segs = v.items.map(it => it.type === 'video'
+                ? `<span title="${escAttr(it.name)} (${it.start}-${it.end}s)" style="color:var(--accent-secondary)">[V ${it.duration}s]</span>`
+                : `<span title="${escAttr(it.name)}" style="color:var(--warning)">[F ${it.duration}s]</span>`
+            ).join(' ');
+            return `<div style="margin:4px 0;padding-top:4px;border-top:1px solid var(--border)">
+                <b>Video ${v.index + 1}</b> &mdash; ${v.item_count} parca, ~${v.total_duration}sn<br>
+                <div style="font-size:11px;line-height:1.9">${segs || '<i>bos</i>'}</div>
+            </div>`;
+        }).join('');
+        resultDiv.innerHTML = `
+            <b>${escHtml(data.folder_name)}</b> &mdash; ${data.video_count} video, ${data.photo_count} foto
+            <span style="color:var(--text-muted)">(${escHtml(data.mode)})</span>
+            ${rows}`;
     } catch (e) {
         resultDiv.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message)}</span>`;
     }
