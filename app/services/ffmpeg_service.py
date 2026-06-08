@@ -1,6 +1,7 @@
 import subprocess
 import os
 import re
+import uuid
 from pathlib import Path
 
 from app.config import FFMPEG_BIN, TEMP_DIR, YOUTUBE_EXPORT_SETTINGS
@@ -11,8 +12,27 @@ from app.config import FFMPEG_BIN, TEMP_DIR, YOUTUBE_EXPORT_SETTINGS
 _gpu_encoder_cache: str | None = "__unset__"
 
 
+def _encoder_supports(encoder: str) -> bool:
+    """Test-encode 1s of testsrc to confirm the encoder actually works.
+
+    An encoder can be listed in ``-encoders`` yet fail at runtime (no driver,
+    no GPU session, locked by another process). A cheap probe avoids hard export
+    failures by only trusting encoders that round-trip a frame.
+    """
+    cmd = [
+        FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=10",
+        "-c:v", encoder, "-f", "null", "-",
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def detect_gpu_encoder() -> str | None:
-    """Detect available GPU encoder (cached after first call)."""
+    """Detect a *working* GPU encoder (cached after first call)."""
     global _gpu_encoder_cache
     if _gpu_encoder_cache != "__unset__":
         return _gpu_encoder_cache
@@ -22,11 +42,29 @@ def detect_gpu_encoder() -> str | None:
         capture_output=True, text=True
     )
     for encoder in ["h264_nvenc", "h264_amf", "h264_qsv"]:
-        if encoder in result.stdout:
+        if encoder in result.stdout and _encoder_supports(encoder):
             _gpu_encoder_cache = encoder
             return _gpu_encoder_cache
     _gpu_encoder_cache = None
     return _gpu_encoder_cache
+
+
+def segment_encoder_args(crf: int = 20) -> list[str]:
+    """Return ``-c:v ...`` args for batch/segment encoding.
+
+    Prefers a validated GPU encoder (NVENC/AMF/QSV) with its own constant-quality
+    rate control, falling back to CPU ``libx264``. Audio args are added by callers.
+    """
+    enc = detect_gpu_encoder()
+    if enc == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr",
+                "-cq", str(crf), "-b:v", "0"]
+    if enc == "h264_amf":
+        return ["-c:v", "h264_amf", "-rc", "cqp",
+                "-qp_i", str(crf), "-qp_p", str(crf)]
+    if enc == "h264_qsv":
+        return ["-c:v", "h264_qsv", "-global_quality", str(crf)]
+    return ["-c:v", "libx264", "-preset", "fast", "-crf", str(crf)]
 
 
 def trim_clip(input_path: str, output_path: str, in_point: float, out_point: float):
@@ -46,7 +84,7 @@ def trim_clip(input_path: str, output_path: str, in_point: float, out_point: flo
 
 def concat_clips(clip_paths: list[str], output_path: str) -> str:
     """Concatenate clips using concat demuxer."""
-    list_file = TEMP_DIR / "concat_list.txt"
+    list_file = TEMP_DIR / f"concat_list_{uuid.uuid4().hex[:8]}.txt"
     with open(list_file, "w", encoding="utf-8") as f:
         for p in clip_paths:
             safe = p.replace("\\", "/").replace("'", "'\\''")
@@ -56,7 +94,13 @@ def concat_clips(clip_paths: list[str], output_path: str) -> str:
         FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0",
         "-i", str(list_file), "-c", "copy", output_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        try:
+            list_file.unlink(missing_ok=True)
+        except Exception:
+            pass
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg concat hatasi: {result.stderr[-500:]}")
     return output_path
@@ -74,6 +118,7 @@ async def export_project(
     import asyncio
     settings = YOUTUBE_EXPORT_SETTINGS
     temp_files: list[str] = []
+    run_id = uuid.uuid4().hex[:8]  # unique per export so concurrent runs never collide
 
     try:
         # Step 1: Trim clips
@@ -82,7 +127,7 @@ async def export_project(
             media_path = clip["media_path"]
             if not Path(media_path).exists():
                 raise RuntimeError(f"Klip dosyasi bulunamadi: {media_path}")
-            trimmed = str(TEMP_DIR / f"trimmed_{i}.mp4")
+            trimmed = str(TEMP_DIR / f"trimmed_{run_id}_{i}.mp4")
             if clip.get("in_point", 0) > 0 or clip.get("out_point", -1) > 0:
                 trim_clip(media_path, trimmed, clip.get("in_point", 0), clip.get("out_point", -1))
                 temp_files.append(trimmed)
@@ -94,7 +139,7 @@ async def export_project(
         if len(trimmed_paths) == 1 and not audio_tracks and not subtitles:
             input_file = trimmed_paths[0]
         elif len(trimmed_paths) > 1:
-            concat_out = str(TEMP_DIR / "concat_out.mp4")
+            concat_out = str(TEMP_DIR / f"concat_{run_id}.mp4")
             concat_clips(trimmed_paths, concat_out)
             temp_files.append(concat_out)
             input_file = concat_out
@@ -121,7 +166,7 @@ async def export_project(
 
             # Subtitle filter
             if subtitles:
-                ass_path = str(TEMP_DIR / "subs.ass")
+                ass_path = str(TEMP_DIR / f"subs_{run_id}.ass")
                 _generate_ass(subtitles, ass_path)
                 temp_files.append(ass_path)
                 # Escape backslashes and single quotes for the ASS filter path
@@ -406,9 +451,10 @@ def create_video_mix(
     # ── 2. Extract each segment with FFmpeg ──
     temp_clips = []
     temp_files = []
+    mix_id = uuid.uuid4().hex[:8]
     try:
         for i, seg in enumerate(segments):
-            temp_path = str(TEMP_DIR / f"mix_seg_{i}.mp4")
+            temp_path = str(TEMP_DIR / f"mix_seg_{mix_id}_{i}.mp4")
             temp_files.append(temp_path)
 
             seg_dur = seg["end"] - seg["start"]
@@ -463,7 +509,7 @@ def create_video_mix(
 
 def _concat_with_demuxer(clips: list[str], output_path: str):
     """Fast concat using demuxer (no transitions, but handles many clips)."""
-    list_file = str(TEMP_DIR / "mix_concat.txt")
+    list_file = str(TEMP_DIR / f"mix_concat_{uuid.uuid4().hex[:8]}.txt")
     with open(list_file, "w", encoding="utf-8") as f:
         for c in clips:
             safe = c.replace("\\", "/").replace("'", "'\\''")
@@ -482,6 +528,23 @@ def _concat_with_demuxer(clips: list[str], output_path: str):
         pass
     if result.returncode != 0:
         raise RuntimeError(f"Concat hatasi: {result.stderr[-500:]}")
+
+
+def compute_xfade_offsets(durations: list[float], trans_dur: float) -> list[float]:
+    """Return the ``offset`` for each xfade transition in a left-folded chain.
+
+    Clips with the given ``durations`` are joined left-to-right by
+    ``trans_dur``-second crossfades. Transition ``i`` (joining the accumulated
+    chain of clips ``0..i-1`` with clip ``i``) begins on the combined timeline at
+    ``sum(durations[:i]) - i*trans_dur`` — i.e. ``trans_dur`` before the running
+    output's end. Returns ``len(durations) - 1`` offsets, each clamped to >= 0.
+    """
+    offsets: list[float] = []
+    cumulative = 0.0
+    for i in range(1, len(durations)):
+        cumulative += durations[i - 1]
+        offsets.append(round(max(0.0, cumulative - i * trans_dur), 3))
+    return offsets
 
 
 def _concat_with_xfade(clips: list[str], output_path: str,
@@ -507,23 +570,16 @@ def _concat_with_xfade(clips: list[str], output_path: str,
     for i in range(len(clips)):
         filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS[v{i}]")
 
-    # Chain xfade
-    cumulative_offset = 0
+    # Chain xfade. offsets[i-1] is where transition i starts on the timeline.
+    offsets = compute_xfade_offsets(durations, trans_dur)
     prev_label = "[v0]"
     for i in range(1, len(clips)):
-        cumulative_offset += durations[i - 1] - trans_dur
-        if cumulative_offset < 0:
-            cumulative_offset = 0
         out_label = f"[xf{i}]" if i < len(clips) - 1 else "[vout]"
         filter_parts.append(
             f"{prev_label}[v{i}]xfade=transition={transition}:"
-            f"duration={trans_dur}:offset={cumulative_offset}{out_label}"
+            f"duration={trans_dur}:offset={offsets[i - 1]}{out_label}"
         )
         prev_label = out_label
-        # Adjust cumulative offset: after xfade the output duration is shorter
-        # The output of xfade is: duration[0..i] - (i * trans_dur)
-        # Reset cumulative for next iteration
-        cumulative_offset = sum(durations[:i + 1]) - i * trans_dur - trans_dur
 
     # Audio: concat audio streams
     audio_inputs = "".join(f"[{i}:a]" for i in range(len(clips)))

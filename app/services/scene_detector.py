@@ -66,6 +66,18 @@ def detect_scenes(
         cached = cache[key]
         return [tuple(x) for x in cached]
 
+    def _remember(scenes: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        """Persist a result (including fallbacks) so it is not recomputed."""
+        if key:
+            cache[key] = scenes
+            if len(cache) > 500:
+                trimmed = dict(list(cache.items())[-400:])
+                trimmed[key] = scenes
+                _save_cache(trimmed)
+            else:
+                _save_cache(cache)
+        return scenes
+
     cmd = [
         FFMPEG_BIN, "-hide_banner", "-nostats",
         "-i", video_path,
@@ -79,7 +91,9 @@ def detect_scenes(
             timeout=240,
         )
     except subprocess.TimeoutExpired:
-        return [(0.0, total_duration)]
+        # Cache the fallback too — otherwise a problem file re-pays the 4-min
+        # timeout on every batch run.
+        return _remember([(0.0, round(total_duration, 2))])
 
     cuts: list[float] = []
     for line in result.stderr.splitlines():
@@ -99,13 +113,6 @@ def detect_scenes(
             scenes.append((s, e))
 
     if not scenes:
-        scenes = [(0.0, total_duration)]
+        scenes = [(0.0, round(total_duration, 2))]
 
-    if key:
-        cache[key] = scenes
-        # Trim cache if it gets too large
-        if len(cache) > 500:
-            cache = dict(list(cache.items())[-400:])
-        _save_cache(cache)
-
-    return scenes
+    return _remember(scenes)

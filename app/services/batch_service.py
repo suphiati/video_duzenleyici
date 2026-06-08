@@ -11,6 +11,7 @@ from app.services.ffmpeg_service import (
     create_slideshow,
     _concat_with_demuxer,
     _concat_with_xfade,
+    segment_encoder_args,
 )
 from app.services.folder_scanner import scan_folder
 from app.services import (
@@ -143,23 +144,41 @@ def _interleave_content(video_segments: list[dict], photos: list[dict],
 # Blocking helpers
 # ---------------------------------------------------------------------------
 
-def _encode_video_segment(item: dict, temp_path: str, w: str, h: str) -> bool:
+def _build_segment_cmd(item: dict, temp_path: str, w: str, h: str,
+                       encoder_args: list[str]) -> list[str]:
     seg_dur = item["end"] - item["start"]
-    cmd = [
+    return [
         FFMPEG_BIN, "-y",
         "-ss", str(item["start"]),
         "-t", str(seg_dur),
         "-i", item["path"],
         "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        *encoder_args,
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart",
         temp_path,
     ]
+
+
+def _encode_video_segment(item: dict, temp_path: str, w: str, h: str) -> bool:
+    encoder_args = segment_encoder_args(20)
+    cmd = _build_segment_cmd(item, temp_path, w, h, encoder_args)
     result = subprocess.run(cmd, capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    # A validated GPU encoder can still fail on a specific input — retry on CPU
+    # so one awkward clip doesn't drop a segment from the plan.
+    if encoder_args[:2] != ["-c:v", "libx264"]:
+        cpu_cmd = _build_segment_cmd(
+            item, temp_path, w, h,
+            ["-c:v", "libx264", "-preset", "fast", "-crf", "20"],
+        )
+        cpu_result = subprocess.run(cpu_cmd, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
+        return cpu_result.returncode == 0
+    return False
 
 
 def _encode_photo_segment(item: dict, temp_path: str) -> bool:
@@ -176,6 +195,10 @@ def _encode_photo_segment(item: dict, temp_path: str) -> bool:
         return False
 
 
+class BatchCancelled(Exception):
+    """Raised when a cancel is requested mid-render."""
+
+
 async def create_batch_video(
     content_plan: list[dict],
     output_path: str,
@@ -183,23 +206,32 @@ async def create_batch_video(
     transition_duration: float,
     resolution: str = "1920x1080",
     progress_callback=None,
-) -> str:
-    """Render one batch video from a content plan. FFmpeg runs in a thread."""
+    cancel_event: asyncio.Event = None,
+) -> dict:
+    """Render one batch video from a content plan. FFmpeg runs in a thread.
+
+    Returns render stats ``{output_path, total, rendered, dropped}``. Raises
+    ``BatchCancelled`` if ``cancel_event`` is set between segments.
+    """
     w, h = resolution.split("x")
     temp_clips: list[str] = []
     temp_files: list[str] = []
     batch_id = str(uuid.uuid4())[:8]
+    dropped = 0
 
     try:
         total_items = len(content_plan)
 
         for i, item in enumerate(content_plan):
+            if cancel_event and cancel_event.is_set():
+                raise BatchCancelled()
             if item["type"] == "video":
                 temp_path = str(TEMP_DIR / f"batch_{batch_id}_seg_{i}.mp4")
                 temp_files.append(temp_path)
                 ok = await asyncio.to_thread(_encode_video_segment, item, temp_path, w, h)
                 if not ok:
                     temp_files.pop()
+                    dropped += 1
                     continue
                 temp_clips.append(temp_path)
             elif item["type"] == "photo":
@@ -208,6 +240,7 @@ async def create_batch_video(
                 ok = await asyncio.to_thread(_encode_photo_segment, item, temp_path)
                 if not ok:
                     temp_files.pop()
+                    dropped += 1
                     continue
                 temp_clips.append(temp_path)
 
@@ -229,7 +262,12 @@ async def create_batch_video(
         if progress_callback:
             await progress_callback(85)
 
-        return output_path
+        return {
+            "output_path": output_path,
+            "total": total_items,
+            "rendered": len(temp_clips),
+            "dropped": dropped,
+        }
     finally:
         for tf in temp_files:
             try:
@@ -316,8 +354,12 @@ async def _apply_music_track(
     profile: dict,
     overrides: dict,
 ) -> None:
-    video_vol = overrides.get("original_audio_volume") or profile.get("original_audio_volume", 0.55)
-    music_vol = overrides.get("music_volume") or profile.get("music_volume", 0.45)
+    # Explicit None checks so a deliberate 0.0 (mute) is honoured instead of
+    # being silently replaced by the profile default.
+    ov_video = overrides.get("original_audio_volume")
+    ov_music = overrides.get("music_volume")
+    video_vol = ov_video if ov_video is not None else profile.get("original_audio_volume", 0.55)
+    music_vol = ov_music if ov_music is not None else profile.get("music_volume", 0.45)
     await asyncio.to_thread(
         audio_mixer.mix_with_music,
         raw_path, music_path, final_path,
@@ -511,12 +553,13 @@ async def run_batch(
                 render_target = raw_path
 
         try:
-            await create_batch_video(
+            render_stats = await create_batch_video(
                 content_plan=plan,
                 output_path=render_target,
                 transition=transition,
                 transition_duration=transition_duration,
                 progress_callback=creation_progress,
+                cancel_event=cancel_event,
             )
 
             if raw_path and music_for_this and pro_profile:
@@ -537,6 +580,14 @@ async def run_batch(
                         Path(raw_path).unlink(missing_ok=True)
                     except Exception:
                         pass
+        except BatchCancelled:
+            # Drop the half-written output and report a clean cancel.
+            try:
+                Path(render_target).unlink(missing_ok=True)
+            except Exception:
+                pass
+            await send_message({"type": "cancelled", "completed_count": len(results)})
+            return results
         except Exception as e:
             await send_message({
                 "type": "video_status", "index": i, "status": "error",
@@ -544,9 +595,18 @@ async def run_batch(
             })
             continue
 
+        dropped = render_stats.get("dropped", 0) if isinstance(render_stats, dict) else 0
+        if dropped:
+            await send_message({
+                "type": "video_status", "index": i, "status": "creating",
+                "title": title, "progress": 90,
+                "warning": f"{dropped} segment kodlanamadi ve atlandi",
+            })
+
         video_result = {
             "index": i, "title": title,
             "output_path": output_path, "youtube_url": "",
+            "dropped_segments": dropped,
         }
 
         if upload_to_youtube:
