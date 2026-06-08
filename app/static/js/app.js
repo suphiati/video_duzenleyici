@@ -500,7 +500,10 @@ function renderSubtitleList() {
         el.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">Altyazi yok</div>';
         return;
     }
-    el.innerHTML = state.project.subtitles.map(s => `
+    el.innerHTML = state.project.subtitles.map(s => {
+        const pos = s.position || 'bottom';
+        const opt = (v, label) => `<option value="${v}"${pos === v ? ' selected' : ''}>${label}</option>`;
+        return `
         <div class="subtitle-entry">
             <input type="number" value="${s.start_time}" step="0.1" min="0"
                 onchange="app.editSubtitle('${s.id}','start_time',this.value)" title="Baslangic">
@@ -510,15 +513,21 @@ function renderSubtitleList() {
                 onchange="app.editSubtitle('${s.id}','text',this.value)" title="Metin">
             <input type="color" value="${s.color || '#FFFFFF'}"
                 onchange="app.editSubtitle('${s.id}','color',this.value)" title="Renk">
+            <input type="number" value="${s.font_size || 48}" step="1" min="8" max="200" style="width:52px"
+                onchange="app.editSubtitle('${s.id}','font_size',this.value)" title="Punto">
+            <select onchange="app.editSubtitle('${s.id}','position',this.value)" title="Konum">
+                ${opt('top', 'Ust')}${opt('center', 'Orta')}${opt('bottom', 'Alt')}
+            </select>
             <button onclick="app.deleteSubtitle('${s.id}')" style="background:var(--danger)">x</button>
         </div>
-    `).join('');
+    `;}).join('');
 }
 
 app.editSubtitle = async (id, field, value) => {
     const sub = state.project.subtitles.find(s => s.id === id);
     if (!sub) return;
     if (field === 'start_time' || field === 'end_time') value = parseFloat(value);
+    else if (field === 'font_size') value = parseInt(value, 10) || 48;
     sub[field] = value;
     try {
         const data = await api.updateSubtitle(state.project.id, id, sub);
@@ -1077,7 +1086,7 @@ app.checkProStatus = async () => {
         const [pro, music] = await Promise.all([api.proStatus(), api.musicList()]);
         const beatInfo = pro.beat_sync_available
             ? 'ritim senkronu acik'
-            : 'ritim senkronu kapali (librosa yuklu degil)';
+            : 'ritim senkronu kapali — acmak icin: pip install -r requirements-pro.txt';
         const musicInfo = music.count > 0
             ? `${music.count} muzik dosyasi`
             : 'Muzik yok (data/music/ klasorune mp3 ekleyin)';

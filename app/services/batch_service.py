@@ -319,10 +319,20 @@ async def _build_pro_plans(
 
     beats: list[float] | None = None
     tempo: float | None = None
-    if music_pick and profile.get("beat_sync") and beat_analyzer.is_available():
-        await send_message({"type": "pro_status",
-                            "message": f"Muzik ritmi analiz ediliyor: {Path(music_pick['path']).name}"})
-        beats, tempo = await asyncio.to_thread(_analyze_beats_sync, music_pick["path"])
+    if music_pick and profile.get("beat_sync"):
+        if beat_analyzer.is_available():
+            await send_message({"type": "pro_status",
+                                "message": f"Muzik ritmi analiz ediliyor: {Path(music_pick['path']).name}"})
+            beats, tempo = await asyncio.to_thread(_analyze_beats_sync, music_pick["path"])
+        else:
+            # The chosen style wants beat-sync but librosa is missing — tell the
+            # user instead of silently falling back to linear spacing.
+            await send_message({
+                "type": "pro_status",
+                "message": "Ritim senkronu icin librosa yuklu degil; "
+                           "duz aralikli kesim kullanilacak "
+                           "(pip install -r requirements-pro.txt).",
+            })
 
     await send_message({"type": "pro_status",
                         "message": "Sahneler tespit ediliyor..."})

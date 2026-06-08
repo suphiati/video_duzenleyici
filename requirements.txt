@@ -10,5 +10,5 @@ google-auth==2.36.0
 google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 httpx==0.28.1
-# Optional — enables pro-mode beat-synced cutting. Skip if disk budget matters.
-# librosa==0.10.2
+# Optional pro-mode extras (beat-synced cutting) live in requirements-pro.txt:
+#   pip install -r requirements-pro.txt

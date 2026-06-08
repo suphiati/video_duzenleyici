@@ -1,0 +1,6 @@
+# Optional "pro mode" extras. Install with:
+#   pip install -r requirements-pro.txt
+# Enables beat-synced cutting in pro mode (app/services/beat_analyzer.py).
+# Heavy (~pulls numpy/scipy/numba); skip if disk budget matters — the pipeline
+# falls back to linear cut spacing when this is absent.
+librosa==0.10.2
