@@ -52,6 +52,32 @@ app.browsePath = async (path) => {
     }
 };
 
+app.loadDrives = async () => {
+    const bar = $('driveBar');
+    if (!bar) return;
+    try {
+        const data = await api.drives();
+        const drives = data.drives || [];
+        const quick = data.quick || [];
+        state.driveItems = [
+            ...drives.map(d => ({ label: d.replace('\\', ''), path: d, icon: '💾' })),
+            ...quick.map(q => ({ label: q.name, path: q.path, icon: '📂' })),
+        ];
+        bar.innerHTML = state.driveItems.map((it, idx) =>
+            `<button class="drive-btn" data-didx="${idx}" title="${escHtml(it.path)}"
+                style="font-size:11px;padding:2px 7px;cursor:pointer">${it.icon} ${escHtml(it.label)}</button>`
+        ).join('');
+        bar.onclick = (e) => {
+            const btn = e.target.closest('.drive-btn[data-didx]');
+            if (!btn) return;
+            const it = state.driveItems[parseInt(btn.dataset.didx)];
+            if (it) app.browsePath(it.path);
+        };
+    } catch (e) {
+        // Non-fatal: the path box still works.
+    }
+};
+
 app.goUp = () => {
     if (state.parentPath) {
         app.browsePath(state.parentPath);
@@ -1646,14 +1672,10 @@ function escAttr(s) {
 
 // ─── Init ───
 async function init() {
-    // Load drives and browse default path
+    // Render the drive / quick-access bar, then browse a sensible default.
+    await app.loadDrives();
     try {
-        const drives = await api.drives();
-        if (drives.drives.length) {
-            // Try common video folders first
-            const userDir = 'C:\\Users';
-            app.browsePath(userDir);
-        }
+        await app.browsePath('C:\\Users');
     } catch {
         app.browsePath('C:\\');
     }

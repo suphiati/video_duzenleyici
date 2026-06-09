@@ -41,6 +41,8 @@
                     <input id="pathInput" value="C:\\" onkeydown="if(event.key==='Enter')app.browsePath(this.value)">
                     <button onclick="app.browsePath(document.getElementById('pathInput').value)">Git</button>
                 </div>
+                <div class="drive-bar" id="driveBar"
+                    style="display:flex;flex-wrap:wrap;gap:3px;padding:4px 6px;border-bottom:1px solid var(--border)"></div>
                 <div class="file-list" id="fileList"></div>
             </div>
 

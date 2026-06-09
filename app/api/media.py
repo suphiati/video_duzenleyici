@@ -55,30 +55,47 @@ async def browse_files(req: BrowseRequest):
         raise HTTPException(400, "Bu bir klasor degil")
 
     all_ext = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS | AUDIO_EXTENSIONS
-    items = []
+
     try:
-        for entry in sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
-            if entry.name.startswith("."):
-                continue
-            if entry.is_dir():
-                items.append({"name": entry.name, "path": str(entry), "type": "folder"})
-            elif entry.suffix.lower() in all_ext:
-                ext = entry.suffix.lower()
-                if ext in VIDEO_EXTENSIONS:
-                    ftype = "video"
-                elif ext in IMAGE_EXTENSIONS:
-                    ftype = "image"
-                else:
-                    ftype = "audio"
-                items.append({
-                    "name": entry.name,
-                    "path": str(entry),
-                    "type": ftype,
-                    "size": entry.stat().st_size,
-                })
+        raw_entries = list(p.iterdir())
     except PermissionError:
         raise HTTPException(403, "Erisim izni yok")
-    return {"path": str(p), "parent": str(p.parent), "items": items}
+    except OSError as e:
+        raise HTTPException(400, f"Klasor okunamadi: {e}")
+
+    folders = []
+    files = []
+    for entry in raw_entries:
+        # Probe each entry defensively: a single inaccessible item (a junction,
+        # a system reparse point, an access-denied file) must not abort the
+        # whole listing — otherwise the browser looks "stuck".
+        try:
+            if entry.name.startswith("."):
+                continue
+            is_dir = entry.is_dir()
+        except OSError:
+            continue
+        if is_dir:
+            folders.append({"name": entry.name, "path": str(entry), "type": "folder"})
+            continue
+        ext = entry.suffix.lower()
+        if ext not in all_ext:
+            continue
+        if ext in VIDEO_EXTENSIONS:
+            ftype = "video"
+        elif ext in IMAGE_EXTENSIONS:
+            ftype = "image"
+        else:
+            ftype = "audio"
+        try:
+            size = entry.stat().st_size
+        except OSError:
+            size = 0
+        files.append({"name": entry.name, "path": str(entry), "type": ftype, "size": size})
+
+    folders.sort(key=lambda it: it["name"].lower())
+    files.sort(key=lambda it: it["name"].lower())
+    return {"path": str(p), "parent": str(p.parent), "items": folders + files}
 
 
 @router.post("/import")
@@ -162,7 +179,7 @@ async def stream_media(path: str):
 
 @router.get("/drives")
 async def list_drives():
-    """List available drives on Windows."""
+    """List available drives plus quick-access user folders."""
     drives = []
     if os.name == "nt":
         import string
@@ -172,4 +189,29 @@ async def list_drives():
                 drives.append(drive)
     else:
         drives = ["/"]
-    return {"drives": drives}
+
+    quick = []
+    seen_labels = set()
+    home = Path.home()
+    # OneDrive variants first so a redirected desktop wins over an empty stub.
+    candidates = [
+        ("Ev", home),
+        ("Masaustu", home / "OneDrive" / "Masaüstü"),  # Turkish OneDrive
+        ("Masaustu", home / "OneDrive" / "Desktop"),
+        ("Masaustu", home / "Desktop"),
+        ("Videolar", home / "Videos"),
+        ("Indirilenler", home / "Downloads"),
+        ("Belgeler", home / "Documents"),
+        ("Resimler", home / "Pictures"),
+    ]
+    for label, pth in candidates:
+        if label in seen_labels:
+            continue
+        try:
+            if pth.exists() and pth.is_dir():
+                quick.append({"name": label, "path": str(pth)})
+                seen_labels.add(label)
+        except OSError:
+            continue
+
+    return {"drives": drives, "quick": quick}
