@@ -6,3 +6,7 @@ data/
 dist/
 build/
 .env
+
+# PyInstaller desktop build artifacts (build_exe.ps1)
+VideoDuzenleyici.exe
+VideoDuzenleyici.spec

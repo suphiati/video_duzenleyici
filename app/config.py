@@ -1,13 +1,23 @@
+import sys
 from pathlib import Path
 import shutil
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    # PyInstaller bundle: read-only files (app/static) are unpacked to a temp
+    # dir (_MEIPASS); writable data lives next to the .exe so projects, music
+    # and YouTube tokens persist across runs (and survive a desktop shortcut).
+    APP_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "app"
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent
+    BASE_DIR = APP_DIR.parent
+
 DATA_DIR = BASE_DIR / "data"
 PROJECTS_DIR = DATA_DIR / "projects"
 THUMBNAILS_DIR = DATA_DIR / "thumbnails"
 EXPORTS_DIR = DATA_DIR / "exports"
 TEMP_DIR = DATA_DIR / "temp"
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR = APP_DIR / "static"
 MEDIA_LIBRARY_FILE = DATA_DIR / "media_library.json"
 
 YOUTUBE_DIR = DATA_DIR / "youtube"
