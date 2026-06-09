@@ -32,8 +32,11 @@ pytest -m slow         # opt-in smoke tests that actually invoke ffmpeg
   `app/config.py:23-24`, falls back to the bare names).
 - **librosa** (optional) — enables pro-mode beat-synced cutting
   (`app/services/beat_analyzer.py`, lazy-imported; absent → linear cut spacing).
-- **Ollama** (optional) — local LLM at `http://localhost:11434` for AI metadata
-  (`app/services/ai_service.py`; absent → templated titles).
+- **AI metadata** (optional) — `app/services/ai_service.py` resolves a backend
+  in this order: local **Ollama** (`http://localhost:11434`, free) →
+  **Claude** (`ANTHROPIC_API_KEY`) → **OpenAI** (`OPENAI_API_KEY`). Per-batch
+  `provider` ("auto"|"ollama"|"claude"|"openai") overrides the order. No backend
+  → templated titles. Cloud calls are raw `httpx`, no SDK needed.
 - **YouTube upload** (optional) — drop Google OAuth `client_secrets.json` in
   `data/youtube/`. The OAuth redirect is hard-coded to
   `http://localhost:8000/api/batch/youtube/callback` (`youtube_service.py:9`),
@@ -68,13 +71,19 @@ between planning and rendering.
 ### Batch pipeline flow
 
 `scan_folder` → (pro: `scene_detector` + optional `beat_analyzer` →
-`pro_planner.build_plans`) or (legacy `plan_content_distribution`) →
-`create_batch_video` per output → optional music post-mix (`audio_mixer`,
-`-c:v copy` so no video re-encode) → optional `youtube_service.upload_video`.
+`pro_planner.build_plans`) or (legacy `plan_content_distribution`) → per output:
+`_inject_cards` wraps the plan with optional intro/outro title-card stills
+(rendered by `thumbnail_service.make_card_image`, no "subscribe" CTA) →
+`create_batch_video` → optional music post-mix (`audio_mixer`, `-c:v copy` so no
+video re-encode) → optional best-frame thumbnail
+(`thumbnail_service.generate_youtube_thumbnail`) → optional
+`youtube_service.upload_video` (uploads that thumbnail too).
 Everything streams over the `/api/batch/ws` WebSocket via `send_message`
 events: `status`, `scan_complete`, `pro_status`, `ai_status`, `started`,
-`video_status` (creating/uploading/completed/error, may carry `warning` or
-`dropped_segments`), `batch_completed`, `cancelled`, `error`.
+`video_status` (creating/uploading/completed/error, may carry `warning`,
+`dropped_segments`, or `thumbnail_path`), `batch_completed`, `cancelled`,
+`error`. Cards inject as `photo` plan items, so they reuse the photo encode
+path and need no new render code.
 
 ## Conventions
 

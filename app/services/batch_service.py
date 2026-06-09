@@ -22,6 +22,7 @@ from app.services import (
     music_library,
     beat_analyzer,
     audio_mixer,
+    thumbnail_service,
 )
 
 
@@ -472,6 +473,67 @@ async def _apply_music_track(
 
 
 # ---------------------------------------------------------------------------
+# Intro / outro title cards
+# ---------------------------------------------------------------------------
+
+def _inject_cards(
+    plan: list[dict],
+    intro_path: str | None = None,
+    outro_path: str | None = None,
+    duration: float = 2.5,
+) -> list[dict]:
+    """Wrap a content plan with intro/outro card photo items.
+
+    Cards are plain stills rendered to PNG, so they ride the existing photo
+    encode path (``_encode_photo_segment`` -> slideshow) and match the batch
+    render format automatically.
+    """
+    new_plan: list[dict] = []
+    if intro_path:
+        new_plan.append({"type": "photo", "path": intro_path, "duration": duration})
+    new_plan.extend(plan)
+    if outro_path:
+        new_plan.append({"type": "photo", "path": outro_path, "duration": duration})
+    return new_plan
+
+
+def _render_cards(
+    card_settings: dict | None,
+    title: str,
+    part_number: int,
+) -> tuple[str | None, str | None, list[str]]:
+    """Render the intro/outro PNGs for one video. Returns (intro, outro, temps)."""
+    cs = card_settings or {}
+    intro_path: str | None = None
+    outro_path: str | None = None
+    temps: list[str] = []
+
+    if cs.get("intro", True):
+        intro_text = (cs.get("intro_text") or "").strip() or title
+        path = str(TEMP_DIR / f"card_intro_{uuid.uuid4().hex[:8]}.png")
+        try:
+            thumbnail_service.make_card_image(
+                intro_text, path, sub_text=f"Bolum {part_number}")
+            intro_path = path
+            temps.append(path)
+        except Exception:
+            intro_path = None
+
+    if cs.get("outro", True):
+        # No "subscribe" CTA by request — a neutral closing line only.
+        outro_text = (cs.get("outro_text") or "").strip() or "Izlediginiz icin tesekkurler"
+        path = str(TEMP_DIR / f"card_outro_{uuid.uuid4().hex[:8]}.png")
+        try:
+            thumbnail_service.make_card_image(outro_text, path)
+            outro_path = path
+            temps.append(path)
+        except Exception:
+            outro_path = None
+
+    return intro_path, outro_path, temps
+
+
+# ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
 
@@ -499,6 +561,7 @@ async def _build_metadata(
         duration_seconds=target_duration,
         language=ai_settings.get("language", "tr"),
         model=ai_settings.get("model"),
+        provider=ai_settings.get("provider", "auto"),
     )
     if not meta:
         return default_title, default_desc, default_tags
@@ -537,6 +600,8 @@ async def run_batch(
     cancel_event: asyncio.Event = None,
     ai_settings: dict | None = None,
     pro_settings: dict | None = None,
+    auto_thumbnail: bool = True,
+    card_settings: dict | None = None,
 ):
     await send_message({"type": "status", "message": "Klasor taraniyor..."})
     scan_result = await asyncio.to_thread(scan_folder, folder_path)
@@ -578,18 +643,22 @@ async def run_batch(
 
     ai_active = False
     if ai_settings and ai_settings.get("enabled"):
-        ai_active = await ai_service.is_available()
+        ai_backend = await ai_service.resolve_backend(
+            ai_settings.get("provider", "auto"), ai_settings.get("model"))
+        ai_active = ai_backend is not None
         if not ai_active:
             await send_message({
                 "type": "ai_status",
                 "available": False,
-                "message": "Ollama bulunamadi, sablon basliklar kullanilacak.",
+                "message": "AI saglayici yok (Ollama/Claude/OpenAI), "
+                           "sablon basliklar kullanilacak.",
             })
         else:
             await send_message({
                 "type": "ai_status",
                 "available": True,
-                "model": ai_settings.get("model") or ai_service.DEFAULT_MODEL,
+                "provider": ai_backend.provider,
+                "model": ai_backend.model,
             })
 
     await send_message({
@@ -641,6 +710,12 @@ async def run_batch(
                 "progress": round(percent, 1),
             })
 
+        # Intro/outro title cards (no subscribe CTA) wrap the content plan.
+        intro_card, outro_card, card_temps = _render_cards(
+            card_settings, title, i + 1)
+        card_dur = float((card_settings or {}).get("duration", 2.5) or 2.5)
+        plan_to_render = _inject_cards(plan, intro_card, outro_card, card_dur)
+
         # Render to a raw path first so we can post-mix music if pro mode is on.
         render_target = output_path
         raw_path: str | None = None
@@ -662,7 +737,7 @@ async def run_batch(
 
         try:
             render_stats = await create_batch_video(
-                content_plan=plan,
+                content_plan=plan_to_render,
                 output_path=render_target,
                 transition=transition,
                 transition_duration=transition_duration,
@@ -702,6 +777,13 @@ async def run_batch(
                 "error": f"Video olusturma hatasi: {str(e)}",
             })
             continue
+        finally:
+            # Card stills are only needed during the render — clean them up.
+            for _c in card_temps:
+                try:
+                    Path(_c).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         dropped = render_stats.get("dropped", 0) if isinstance(render_stats, dict) else 0
         if dropped:
@@ -716,6 +798,21 @@ async def run_batch(
             "output_path": output_path, "youtube_url": "",
             "dropped_segments": dropped,
         }
+
+        # Best-frame thumbnail with a title overlay (uploaded with the video).
+        thumb_path: str | None = None
+        if auto_thumbnail:
+            candidate = str(Path(output_path).with_suffix(".jpg"))
+            try:
+                made = await asyncio.to_thread(
+                    thumbnail_service.generate_youtube_thumbnail,
+                    output_path, candidate, title, f"Bolum {i+1}",
+                )
+                thumb_path = str(made) if made else None
+            except Exception:
+                thumb_path = None
+        if thumb_path:
+            video_result["thumbnail_path"] = thumb_path
 
         if upload_to_youtube:
             await send_message({
@@ -746,12 +843,13 @@ async def run_batch(
                     privacy=youtube_settings.get("privacy", "private"),
                     category_id=youtube_settings.get("category_id", "22"),
                     progress_callback=progress_bridge,
+                    thumbnail=thumb_path,
                 )
                 video_result["youtube_url"] = youtube_url
                 await send_message({
                     "type": "video_status", "index": i, "status": "completed",
                     "title": title, "youtube_url": youtube_url,
-                    "output_path": output_path,
+                    "output_path": output_path, "thumbnail_path": thumb_path,
                 })
             except Exception as e:
                 await send_message({
@@ -763,6 +861,7 @@ async def run_batch(
             await send_message({
                 "type": "video_status", "index": i, "status": "completed",
                 "title": title, "output_path": output_path,
+                "thumbnail_path": thumb_path,
             })
 
         results.append(video_result)

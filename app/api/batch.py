@@ -66,13 +66,17 @@ async def youtube_callback(code: str):
 
 @router.get("/ai/status")
 async def ai_status():
-    """Report whether a local Ollama instance is reachable."""
-    available = await ai_service.is_available()
-    models: list[str] = []
-    if available:
-        models = await ai_service.list_models()
+    """Report metadata-AI availability across Ollama and cloud fallbacks."""
+    ollama_up = await ai_service.ollama_available()
+    models = await ai_service.list_models() if ollama_up else []
+    backend = await ai_service.resolve_backend("auto")
     return {
-        "available": available,
+        "available": backend is not None,
+        "provider": backend.provider if backend else None,
+        "active_model": backend.model if backend else None,
+        "ollama": ollama_up,
+        "claude": bool(ai_service.ANTHROPIC_API_KEY),
+        "openai": bool(ai_service.OPENAI_API_KEY),
         "host": ai_service.OLLAMA_HOST,
         "default_model": ai_service.DEFAULT_MODEL,
         "models": models,
@@ -190,6 +194,8 @@ async def batch_ws(websocket: WebSocket):
             youtube_settings=req.youtube_settings.model_dump(),
             ai_settings=req.ai_settings.model_dump(),
             pro_settings=req.pro_settings.model_dump(),
+            auto_thumbnail=req.auto_thumbnail,
+            card_settings=req.cards.model_dump(),
             send_message=send_message,
             cancel_event=cancel_event,
         )

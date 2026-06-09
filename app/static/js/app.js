@@ -1019,6 +1019,16 @@ app.showBatchDialog = () => {
             </div>
         </div>
         <div id="batchScanResult" style="display:none;padding:8px;background:var(--bg-lighter);border-radius:4px;margin-bottom:8px;font-size:12px"></div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;padding:8px;background:var(--bg-lighter);border-radius:4px">
+            <button class="primary" style="flex:1" onclick="app.batchOneClick()"
+                title="Akilli kurgu + otomatik muzik + kapak + giris/cikis karti ile tek tusla uret">
+                &#9889; Tek Tusla Uret
+            </button>
+            <small style="color:var(--text-muted);font-size:10px;flex:2">
+                Akilli kurgu, otomatik muzik, AI baslik, kapak fotografi ve
+                giris/cikis karti ile akilli varsayilanlarla baslar.
+            </small>
+        </div>
         <div class="prop-row">
             <label>Kac video olusturulsun</label>
             <input type="number" id="batchNumVideos" value="5" min="1" max="20">
@@ -1087,9 +1097,33 @@ app.showBatchDialog = () => {
         </div>
         <div id="batchProStatus" style="font-size:11px;color:var(--text-muted);margin-bottom:8px"></div>
         <hr style="border-color:var(--border);margin:12px 0">
-        <h3 style="margin-bottom:8px;font-size:14px">Yapay Zeka (Ollama)</h3>
+        <h3 style="margin-bottom:8px;font-size:14px">Cikti Ekstralari</h3>
+        <div class="prop-row">
+            <label>
+                <input type="checkbox" id="batchThumbnail" checked>
+                Otomatik kapak fotografi (en iyi kare + baslik)
+            </label>
+        </div>
+        <div class="prop-row">
+            <label>
+                <input type="checkbox" id="batchIntro" checked>
+                Acilis karti (baslik)
+            </label>
+        </div>
+        <div class="prop-row">
+            <label>
+                <input type="checkbox" id="batchOutro" checked>
+                Kapanis karti
+            </label>
+        </div>
+        <div class="prop-row">
+            <label>Kapanis yazisi</label>
+            <input type="text" id="batchOutroText" placeholder="Izlediginiz icin tesekkurler">
+        </div>
+        <hr style="border-color:var(--border);margin:12px 0">
+        <h3 style="margin-bottom:8px;font-size:14px">Yapay Zeka (Ollama / Claude / OpenAI)</h3>
         <div class="prop-row" style="margin-bottom:8px">
-            <div id="aiStatus" style="font-size:12px;color:var(--text-muted)">Ollama kontrol ediliyor...</div>
+            <div id="aiStatus" style="font-size:12px;color:var(--text-muted)">AI saglayicilar kontrol ediliyor...</div>
         </div>
         <div class="prop-row">
             <label>
@@ -1098,7 +1132,16 @@ app.showBatchDialog = () => {
             </label>
         </div>
         <div class="prop-row">
-            <label>Model</label>
+            <label>Saglayici</label>
+            <select id="batchAIProvider">
+                <option value="auto" selected>Otomatik (Ollama &rarr; Claude &rarr; OpenAI)</option>
+                <option value="ollama">Ollama (yerel)</option>
+                <option value="claude">Claude (ANTHROPIC_API_KEY)</option>
+                <option value="openai">OpenAI (OPENAI_API_KEY)</option>
+            </select>
+        </div>
+        <div class="prop-row">
+            <label>Model (Ollama)</label>
             <select id="batchAIModel">
                 <option value="">(varsayilan)</option>
             </select>
@@ -1196,22 +1239,48 @@ app.checkAIStatus = async () => {
     const enabledCb = document.getElementById('batchAIEnabled');
     try {
         const data = await api.aiStatus();
+        if (modelSel) {
+            modelSel.innerHTML = '<option value="">(varsayilan: ' + escHtml(data.default_model || '') + ')</option>';
+            (data.models || []).forEach(m => {
+                modelSel.innerHTML += `<option value="${escAttr(m)}">${escHtml(m)}</option>`;
+            });
+        }
+        const providers = [];
+        if (data.ollama) providers.push(`Ollama (${(data.models || []).length} model)`);
+        if (data.claude) providers.push('Claude');
+        if (data.openai) providers.push('OpenAI');
         if (data.available) {
-            statusEl.innerHTML = `<span style="color:var(--success)">Ollama bagli</span> - ${data.models.length} model`;
-            if (modelSel) {
-                modelSel.innerHTML = '<option value="">(varsayilan: ' + escHtml(data.default_model) + ')</option>';
-                (data.models || []).forEach(m => {
-                    modelSel.innerHTML += `<option value="${escAttr(m)}">${escHtml(m)}</option>`;
-                });
-            }
+            const active = data.provider ? ` &mdash; aktif: ${escHtml(data.provider)}` : '';
+            statusEl.innerHTML = `<span style="color:var(--success)">AI hazir: ${escHtml(providers.join(', '))}</span>${active}`;
+            if (enabledCb) enabledCb.disabled = false;
         } else {
-            statusEl.innerHTML = `<span style="color:var(--warning)">Ollama bulunamadi (${escHtml(data.host)})</span> - sablon basliklar kullanilir`;
-            if (enabledCb) enabledCb.disabled = true;
+            statusEl.innerHTML = `<span style="color:var(--warning)">AI saglayici yok</span> - Ollama'yi calistirin ya da ANTHROPIC_API_KEY / OPENAI_API_KEY ayarlayin. Sablon basliklar kullanilir.`;
+            if (enabledCb) { enabledCb.disabled = true; enabledCb.checked = false; }
         }
     } catch (e) {
-        statusEl.innerHTML = `<span style="color:var(--warning)">Ollama durumu alinamadi</span>`;
+        statusEl.innerHTML = `<span style="color:var(--warning)">AI durumu alinamadi</span>`;
         if (enabledCb) enabledCb.disabled = true;
     }
+};
+
+app.batchOneClick = () => {
+    const folder = document.getElementById('batchFolderPath')?.value;
+    if (!folder) { toast('Once klasor yolu girin', 'error'); return; }
+    const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    setChk('batchProEnabled', true);
+    setVal('batchProStyle', 'auto');
+    setVal('batchProMusic', 'auto');
+    const musicRow = document.getElementById('batchProMusicPathRow');
+    if (musicRow) musicRow.style.display = 'none';
+    setChk('batchThumbnail', true);
+    setChk('batchIntro', true);
+    setChk('batchOutro', true);
+    setVal('batchAIProvider', 'auto');
+    const aiCb = document.getElementById('batchAIEnabled');
+    if (aiCb && !aiCb.disabled) aiCb.checked = true;
+    toast('Akilli varsayilanlarla baslatiliyor...', '');
+    app.startBatch();
 };
 
 app.batchScanFolder = async () => {
@@ -1335,12 +1404,17 @@ app.startBatch = async () => {
     const tags = tagsStr ? tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
     const privacy = document.getElementById('batchPrivacy')?.value || 'private';
     const aiEnabled = document.getElementById('batchAIEnabled')?.checked ?? false;
+    const aiProvider = document.getElementById('batchAIProvider')?.value || 'auto';
     const aiModel = document.getElementById('batchAIModel')?.value || '';
     const aiLanguage = document.getElementById('batchAILanguage')?.value || 'tr';
     const proEnabled = document.getElementById('batchProEnabled')?.checked ?? false;
     const proStyle = document.getElementById('batchProStyle')?.value || 'auto';
     const proMusicMode = document.getElementById('batchProMusic')?.value || 'auto';
     const proMusicPath = document.getElementById('batchProMusicPath')?.value || '';
+    const autoThumbnail = document.getElementById('batchThumbnail')?.checked ?? true;
+    const introCard = document.getElementById('batchIntro')?.checked ?? true;
+    const outroCard = document.getElementById('batchOutro')?.checked ?? true;
+    const outroText = document.getElementById('batchOutroText')?.value || '';
 
     closeModal();
 
@@ -1381,6 +1455,7 @@ app.startBatch = async () => {
             transition_duration: transDuration,
             shuffle: false,
             upload_to_youtube: uploadYT,
+            auto_thumbnail: autoThumbnail,
             youtube_settings: {
                 title_template: titleTemplate,
                 description: description,
@@ -1389,6 +1464,7 @@ app.startBatch = async () => {
             },
             ai_settings: {
                 enabled: aiEnabled,
+                provider: aiProvider,
                 model: aiModel || null,
                 language: aiLanguage,
                 append_default_description: true,
@@ -1398,6 +1474,11 @@ app.startBatch = async () => {
                 style: proStyle,
                 music_mode: proMusicMode,
                 music_path: proMusicMode === 'specific' ? (proMusicPath || null) : null,
+            },
+            cards: {
+                intro: introCard,
+                outro: outroCard,
+                outro_text: outroText,
             },
         }));
     };
@@ -1429,7 +1510,7 @@ app.startBatch = async () => {
             const el = document.getElementById('batchOverallStatus');
             if (el) {
                 const line = msg.available
-                    ? `AI aktif (${escHtml(msg.model || '')})`
+                    ? `AI aktif (${escHtml([msg.provider, msg.model].filter(Boolean).join(': '))})`
                     : (msg.message || 'AI kullanilmiyor');
                 el.innerHTML = `<span style="color:var(${msg.available ? '--success' : '--warning'})">${line}</span>`;
             }

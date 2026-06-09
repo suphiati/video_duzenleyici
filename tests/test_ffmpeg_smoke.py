@@ -151,3 +151,44 @@ async def test_create_batch_video_parallel_orders_and_concats(media, tmp_path):
     assert stats["rendered"] == 3
     assert stats["dropped"] == 0
     assert ffmpeg_service._get_duration(out) > 1.5
+
+
+@skip_no_ffmpeg
+def test_generate_youtube_thumbnail_best_frame(media, tmp_path):
+    """Best-frame selection + title overlay produces a 1280x720 JPEG."""
+    from PIL import Image
+    from app.services import thumbnail_service
+
+    out = str(tmp_path / "thumb.jpg")
+    result = thumbnail_service.generate_youtube_thumbnail(
+        media["clips"][0], out, title="Tatil Roma - Bolum 1", badge="Bolum 1",
+    )
+    assert result is not None
+    assert Path(out).exists()
+    with Image.open(out) as img:
+        assert img.size == (1280, 720)
+
+
+@skip_no_ffmpeg
+async def test_create_batch_video_with_injected_cards(media, tmp_path):
+    """Intro/outro card stills ride the photo path and concat with content."""
+    from app.services import batch_service, thumbnail_service
+
+    intro = str(tmp_path / "intro.png")
+    outro = str(tmp_path / "outro.png")
+    thumbnail_service.make_card_image("Acilis", intro, sub_text="Bolum 1")
+    thumbnail_service.make_card_image("Izlediginiz icin tesekkurler", outro)
+
+    content = [{"type": "video", "path": media["clips"][0], "start": 0.0, "end": 1.5}]
+    plan = batch_service._inject_cards(content, intro, outro, duration=1.0)
+    assert len(plan) == 3
+
+    out = str(tmp_path / "carded.mp4")
+    stats = await batch_service.create_batch_video(
+        content_plan=plan, output_path=out,
+        transition="none", transition_duration=0.5,  # default 1920x1080
+    )
+    assert Path(out).exists()
+    assert stats["rendered"] == 3
+    # ~1s intro + ~1.5s content + ~1s outro.
+    assert ffmpeg_service._get_duration(out) > 2.5

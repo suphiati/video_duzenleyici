@@ -1,8 +1,20 @@
-"""Lightweight Ollama client for generating YouTube metadata locally (free).
+"""AI client for generating YouTube metadata.
 
-The service talks to a local Ollama instance (http://localhost:11434) and
-returns title, description and tags for a batch video. If Ollama is
-unreachable, callers should fall back to templated values.
+Primary backend is a local Ollama instance (free). When Ollama is unreachable,
+the service falls back to a cloud provider if an API key is configured:
+
+    OLLAMA  (local, free)         -> ANTHROPIC_API_KEY (Claude)  -> OPENAI_API_KEY
+
+Selection is controlled per-call via ``provider`` ("auto" | "ollama" |
+"claude" | "openai"). On any failure callers fall back to templated values.
+
+Environment variables:
+    OLLAMA_HOST        default http://localhost:11434
+    OLLAMA_MODEL       default llama3.2:3b
+    ANTHROPIC_API_KEY  enables Claude fallback
+    CLAUDE_MODEL       default claude-haiku-4-5-20251001
+    OPENAI_API_KEY     enables OpenAI fallback
+    OPENAI_MODEL       default gpt-4o-mini
 """
 
 from __future__ import annotations
@@ -18,6 +30,12 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
 DEFAULT_TIMEOUT = 90.0
 
+# Cloud fallbacks — only used when a key is present.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
 
 @dataclass
 class GeneratedMetadata:
@@ -26,7 +44,13 @@ class GeneratedMetadata:
     tags: list[str]
 
 
-async def is_available() -> bool:
+@dataclass
+class Backend:
+    provider: str  # ollama | claude | openai
+    model: str
+
+
+async def ollama_available() -> bool:
     """Return True if a local Ollama server answers on the configured host."""
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -34,6 +58,11 @@ async def is_available() -> bool:
             return r.status_code == 200
     except Exception:
         return False
+
+
+# Backwards-compatible alias (older callers used ``is_available`` for Ollama).
+async def is_available() -> bool:
+    return await ollama_available()
 
 
 async def list_models() -> list[str]:
@@ -46,6 +75,33 @@ async def list_models() -> list[str]:
             return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
     except Exception:
         return []
+
+
+async def resolve_backend(provider: str = "auto",
+                          model: str | None = None) -> Backend | None:
+    """Pick an available metadata backend, honouring an explicit ``provider``.
+
+    In "auto" mode the chosen Ollama ``model`` override is only applied to
+    Ollama; cloud providers always use their own configured default model.
+    Returns None when nothing usable is configured.
+    """
+    pref = (provider or "auto").lower()
+
+    if pref == "ollama":
+        return Backend("ollama", model or DEFAULT_MODEL) if await ollama_available() else None
+    if pref == "claude":
+        return Backend("claude", model or CLAUDE_MODEL) if ANTHROPIC_API_KEY else None
+    if pref == "openai":
+        return Backend("openai", model or OPENAI_MODEL) if OPENAI_API_KEY else None
+
+    # auto: prefer free local Ollama, then Claude, then OpenAI.
+    if await ollama_available():
+        return Backend("ollama", model or DEFAULT_MODEL)
+    if ANTHROPIC_API_KEY:
+        return Backend("claude", CLAUDE_MODEL)
+    if OPENAI_API_KEY:
+        return Backend("openai", OPENAI_MODEL)
+    return None
 
 
 def _build_prompt(folder_name: str, part_number: int, total_parts: int,
@@ -93,41 +149,84 @@ def _extract_json(raw: str) -> dict | None:
     return None
 
 
-async def generate_metadata(
-    folder_name: str,
-    part_number: int,
-    total_parts: int,
-    duration_seconds: float = 300.0,
-    language: str = "tr",
-    model: str | None = None,
-) -> GeneratedMetadata | None:
-    """Call Ollama /api/generate and return structured metadata.
+# ---------------------------------------------------------------------------
+# Provider backends — each returns raw model text (or None on failure)
+# ---------------------------------------------------------------------------
 
-    Returns None on any failure so callers can fall back to templates.
-    """
-    model_name = model or DEFAULT_MODEL
-    prompt = _build_prompt(folder_name, part_number, total_parts,
-                           duration_seconds, language)
+async def _ollama_generate(prompt: str, model: str) -> str | None:
     payload = {
-        "model": model_name,
+        "model": model,
         "prompt": prompt,
         "stream": False,
         "format": "json",
-        "options": {
-            "temperature": 0.7,
-            "num_predict": 512,
-        },
+        "options": {"temperature": 0.7, "num_predict": 512},
     }
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             r = await client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
             if r.status_code != 200:
                 return None
-            data = r.json()
-            parsed = _extract_json(data.get("response", ""))
+            return r.json().get("response", "")
     except Exception:
         return None
 
+
+async def _claude_generate(prompt: str, model: str) -> str | None:
+    if not ANTHROPIC_API_KEY:
+        return None
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            r = await client.post("https://api.anthropic.com/v1/messages",
+                                  json=payload, headers=headers)
+            if r.status_code != 200:
+                return None
+            blocks = r.json().get("content") or []
+            texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+            return "\n".join(t for t in texts if t)
+    except Exception:
+        return None
+
+
+async def _openai_generate(prompt: str, model: str) -> str | None:
+    if not OPENAI_API_KEY:
+        return None
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 700,
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            r = await client.post("https://api.openai.com/v1/chat/completions",
+                                  json=payload, headers=headers)
+            if r.status_code != 200:
+                return None
+            choices = r.json().get("choices") or []
+            if not choices:
+                return None
+            return (choices[0].get("message") or {}).get("content")
+    except Exception:
+        return None
+
+
+def _finalize(parsed: dict | None) -> GeneratedMetadata | None:
+    """Normalise a parsed JSON object into GeneratedMetadata (or None)."""
     if not parsed:
         return None
 
@@ -155,3 +254,35 @@ async def generate_metadata(
         return None
 
     return GeneratedMetadata(title=title, description=description, tags=tags)
+
+
+async def generate_metadata(
+    folder_name: str,
+    part_number: int,
+    total_parts: int,
+    duration_seconds: float = 300.0,
+    language: str = "tr",
+    model: str | None = None,
+    provider: str = "auto",
+) -> GeneratedMetadata | None:
+    """Generate structured metadata via the first available backend.
+
+    Returns None on any failure so callers can fall back to templates.
+    """
+    backend = await resolve_backend(provider, model)
+    if not backend:
+        return None
+
+    prompt = _build_prompt(folder_name, part_number, total_parts,
+                           duration_seconds, language)
+
+    if backend.provider == "ollama":
+        raw = await _ollama_generate(prompt, backend.model)
+    elif backend.provider == "claude":
+        raw = await _claude_generate(prompt, backend.model)
+    elif backend.provider == "openai":
+        raw = await _openai_generate(prompt, backend.model)
+    else:
+        raw = None
+
+    return _finalize(_extract_json(raw or ""))

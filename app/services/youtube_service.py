@@ -85,9 +85,15 @@ def upload_video(
     privacy: str = "private",
     category_id: str = "22",
     progress_callback=None,
+    thumbnail: str | None = None,
 ) -> str:
     """
     Upload a video to YouTube using resumable upload.
+
+    If ``thumbnail`` points to an existing image, it is set as the video's
+    custom thumbnail after the upload completes. This is best-effort: custom
+    thumbnails require a verified channel, so a failure here never fails the
+    upload itself.
 
     Returns: YouTube video URL
     """
@@ -145,6 +151,17 @@ def upload_video(
             time.sleep(wait)
 
     video_id = response.get("id", "")
+
+    # Best-effort custom thumbnail (requires a verified channel).
+    if video_id and thumbnail and os.path.exists(thumbnail):
+        try:
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(thumbnail, mimetype="image/jpeg"),
+            ).execute()
+        except Exception:
+            pass
+
     if progress_callback:
         progress_callback(100)
 
