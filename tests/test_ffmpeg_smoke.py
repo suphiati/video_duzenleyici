@@ -154,6 +154,27 @@ async def test_create_batch_video_parallel_orders_and_concats(media, tmp_path):
 
 
 @skip_no_ffmpeg
+async def test_scan_folder_in_worker_thread_finds_media(media, tmp_path):
+    """Regression: the batch pipeline scans via asyncio.to_thread, so
+    probe_file_sync must not call asyncio.get_event_loop() (raises off the main
+    thread on 3.10+). A broken probe silently drops every file -> 'bulunamadi'.
+    """
+    import asyncio
+    import shutil
+    from app.services.folder_scanner import scan_folder
+
+    folder = tmp_path / "scanme"
+    folder.mkdir()
+    shutil.copy(media["clips"][0], folder / "a.mp4")
+    shutil.copy(media["img"], folder / "p.png")
+
+    result = await asyncio.to_thread(scan_folder, str(folder))
+    assert result["video_count"] == 1, "video not detected from a worker thread"
+    assert result["photo_count"] == 1
+    assert result["videos"][0]["duration"] > 0
+
+
+@skip_no_ffmpeg
 def test_generate_youtube_thumbnail_best_frame(media, tmp_path):
     """Best-frame selection + title overlay produces a 1280x720 JPEG."""
     from PIL import Image
