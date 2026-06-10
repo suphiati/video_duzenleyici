@@ -107,12 +107,29 @@ def _eq_filter(clip: dict) -> str | None:
     return f"eq=brightness={b:.3f}:contrast={c:.3f}:saturation={s:.3f}"
 
 
+def _source_has_audio(path: str) -> bool:
+    """True if the file has at least one audio stream (probe; assume yes on error)."""
+    from app.config import FFPROBE_BIN
+    try:
+        r = subprocess.run(
+            [FFPROBE_BIN, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", path],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        return bool(r.stdout.strip())
+    except Exception:
+        return True
+
+
 def _encode_clip_normalized(clip: dict, output_path: str, w: str, h: str, settings: dict):
     """Trim + optional colour eq / hflip / speed + normalise to target res/codec.
 
-    Used only when at least one clip has effects, so all clips share identical
-    codec params and the demuxer concat stays valid. ``-ss``/``-t`` are input
-    options so the source window is selected before any speed change.
+    Every clip is run through this so they all share identical codec params and
+    the demuxer concat stays valid. Re-encoding (rather than stream-copy) also
+    makes trims frame-accurate and never drops the video stream. A clip with no
+    audio gets a silent stereo track so the concat and any music mix stay
+    uniform. ``-ss``/``-t`` are input options so the window is selected before
+    any speed change.
     """
     in_point = float(clip.get("in_point", 0) or 0)
     out_point = float(clip.get("out_point", -1) if clip.get("out_point") is not None else -1)
@@ -134,14 +151,23 @@ def _encode_clip_normalized(clip: dict, output_path: str, w: str, h: str, settin
     if changed_speed:
         vf.append(f"setpts=PTS/{speed:.4f}")
 
+    has_audio = _source_has_audio(clip["media_path"])
+
     cmd = [FFMPEG_BIN, "-y"]
     if in_point > 0:
         cmd += ["-ss", str(in_point)]
     if out_point > 0:
         cmd += ["-t", str(out_point - in_point)]
-    cmd += ["-i", clip["media_path"], "-vf", ",".join(vf)]
-    if changed_speed:
-        cmd += ["-af", _atempo_chain(speed)]
+    cmd += ["-i", clip["media_path"]]
+    if has_audio:
+        cmd += ["-vf", ",".join(vf)]
+        if changed_speed:
+            cmd += ["-af", _atempo_chain(speed)]
+    else:
+        # No source audio — add a silent stereo track so every normalised clip
+        # has a uniform (video + audio) layout.
+        cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+        cmd += ["-vf", ",".join(vf), "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
     cmd += [
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "192k", "-ar", str(settings["audio_sample_rate"]), "-ac", "2",
@@ -151,7 +177,7 @@ def _encode_clip_normalized(clip: dict, output_path: str, w: str, h: str, settin
     result = subprocess.run(cmd, capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
     if result.returncode != 0:
-        raise RuntimeError(f"Klip efekti uygulanamadi: {result.stderr[-400:]}")
+        raise RuntimeError(f"Klip hazirlanamadi: {result.stderr[-400:]}")
 
 
 def trim_clip(input_path: str, output_path: str, in_point: float, out_point: float):
@@ -208,29 +234,21 @@ async def export_project(
     run_id = uuid.uuid4().hex[:8]  # unique per export so concurrent runs never collide
 
     try:
-        # Step 1: Trim clips. If any clip carries colour effects, every clip is
-        # re-encoded + normalised (so the concat stays uniform); otherwise the
-        # fast stream-copy trim path is used unchanged.
-        any_effects = any(_clip_has_effects(c) for c in clips)
+        # Step 1: Normalise every clip (trim + scale/pad + optional effects +
+        # guaranteed stereo audio). Re-encoding here is what makes trims
+        # frame-accurate and keeps the demuxer concat uniform; the old
+        # stream-copy trim could seek to a non-keyframe and silently drop the
+        # whole video stream, producing an audio-only file.
         w_t, h_t = settings["resolution"].split("x")
         trimmed_paths = []
         for i, clip in enumerate(clips):
             media_path = clip["media_path"]
             if not Path(media_path).exists():
                 raise RuntimeError(f"Klip dosyasi bulunamadi: {media_path}")
-            if any_effects:
-                fx = str(TEMP_DIR / f"fx_{run_id}_{i}.mp4")
-                await asyncio.to_thread(_encode_clip_normalized, clip, fx, w_t, h_t, settings)
-                temp_files.append(fx)
-                trimmed_paths.append(fx)
-                continue
-            trimmed = str(TEMP_DIR / f"trimmed_{run_id}_{i}.mp4")
-            if clip.get("in_point", 0) > 0 or clip.get("out_point", -1) > 0:
-                trim_clip(media_path, trimmed, clip.get("in_point", 0), clip.get("out_point", -1))
-                temp_files.append(trimmed)
-            else:
-                trimmed = media_path
-            trimmed_paths.append(trimmed)
+            norm = str(TEMP_DIR / f"clip_{run_id}_{i}.mp4")
+            await asyncio.to_thread(_encode_clip_normalized, clip, norm, w_t, h_t, settings)
+            temp_files.append(norm)
+            trimmed_paths.append(norm)
 
         # Step 2: Build FFmpeg command
         if len(trimmed_paths) == 1 and not audio_tracks and not subtitles:
@@ -275,12 +293,15 @@ async def export_project(
             vfilter_parts.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease")
             vfilter_parts.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
             vfilter_parts.append(f"format={settings['pixel_format']}")
+            vchain = ",".join(vfilter_parts)
 
-            cmd.extend(["-vf", ",".join(vfilter_parts)])
-
-            # Audio mixing
             if audio_tracks:
-                audio_filter = f"[0:a]volume=1.0[a0];"
+                # Fold the video chain into the same -filter_complex graph as the
+                # audio mix. Using -vf and -filter_complex together is rejected by
+                # ffmpeg ("Stream map '' matches no streams"), which broke every
+                # export that combined an extra audio track with subtitles/scaling.
+                fc = f"[0:v]{vchain}[vout];"
+                fc += "[0:a]volume=1.0[a0];"
                 for j, at in enumerate(audio_tracks):
                     vol = at.get("volume", 1.0)
                     fade_in = at.get("fade_in", 0)
@@ -291,12 +312,12 @@ async def export_project(
                     if fade_out > 0:
                         af += f",afade=t=out:d={fade_out}"
                     af += f"[a{j+1}];"
-                    audio_filter += af
+                    fc += af
                 inputs = "".join(f"[a{k}]" for k in range(len(audio_tracks) + 1))
-                audio_filter += f"{inputs}amix=inputs={len(audio_tracks)+1}:duration=longest[aout]"
-                cmd.extend(["-filter_complex", audio_filter, "-map", "0:v", "-map", "[aout]"])
+                fc += f"{inputs}amix=inputs={len(audio_tracks)+1}:duration=longest[aout]"
+                cmd.extend(["-filter_complex", fc, "-map", "[vout]", "-map", "[aout]"])
             else:
-                cmd.extend(["-map", "0:v", "-map", "0:a?"])
+                cmd.extend(["-vf", vchain, "-map", "0:v", "-map", "0:a?"])
 
             # Encoder settings
             encoder = gpu_enc or settings["video_codec"]
@@ -315,25 +336,10 @@ async def export_project(
                 ])
             cmd.extend(["-g", str(settings["keyint"]), "-movflags", "+faststart"])
         else:
-            # Simple re-encode to YouTube specs
-            w, h = settings["resolution"].split("x")
-            encoder = gpu_enc or settings["video_codec"]
-            cmd.extend([
-                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format={settings['pixel_format']}",
-                "-c:v", encoder,
-                "-b:v", settings["video_bitrate"],
-                "-c:a", settings["audio_codec"],
-                "-b:a", settings["audio_bitrate"],
-                "-ar", str(settings["audio_sample_rate"]),
-                "-g", str(settings["keyint"]),
-                "-movflags", "+faststart",
-            ])
-            if encoder == "libx264":
-                cmd.extend([
-                    "-preset", settings["preset"],
-                    "-profile:v", settings["profile"],
-                    "-level", settings["level"],
-                ])
+            # No extra audio/subtitles: the clips are already normalised to the
+            # target spec, so just finalise the container (fast, no second full
+            # re-encode).
+            cmd.extend(["-c", "copy", "-movflags", "+faststart"])
 
         cmd.append(output_path)
 
@@ -343,6 +349,10 @@ async def export_project(
             universal_newlines=True, encoding="utf-8", errors="replace"
         )
 
+        # Keep a rolling tail of stderr: it is consumed line-by-line here for
+        # progress, so on failure proc.stderr.read() would be empty otherwise —
+        # leaving the user with a blank "Export hatasi:" message.
+        stderr_tail: list[str] = []
         while True:
             if cancel_event and cancel_event.is_set():
                 proc.kill()
@@ -351,6 +361,10 @@ async def export_project(
             line = proc.stderr.readline()
             if not line and proc.poll() is not None:
                 break
+            if line:
+                stderr_tail.append(line)
+                if len(stderr_tail) > 60:
+                    del stderr_tail[0]
             time_match = re.findall(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})", line)
             if time_match and progress_callback:
                 h_val, m_val, s_val, cs_val = time_match[-1]
@@ -360,8 +374,8 @@ async def export_project(
             await asyncio.sleep(0)
 
         if proc.returncode != 0:
-            stderr_remaining = proc.stderr.read()
-            raise RuntimeError(f"Export hatasi: {stderr_remaining[-500:]}")
+            tail = ("".join(stderr_tail) + (proc.stderr.read() or "")).strip()
+            raise RuntimeError(f"Export hatasi: {tail[-700:] or 'bilinmeyen ffmpeg hatasi'}")
         return output_path
 
     finally:

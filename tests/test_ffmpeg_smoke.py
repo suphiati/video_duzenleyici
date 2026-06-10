@@ -12,13 +12,22 @@ from pathlib import Path
 
 import pytest
 
-from app.config import FFMPEG_BIN
+from app.config import FFMPEG_BIN, FFPROBE_BIN
 from app.services import ffmpeg_service, audio_mixer
 
 pytestmark = pytest.mark.slow
 
 _ffmpeg_missing = shutil.which("ffmpeg") is None and not Path(FFMPEG_BIN).exists()
 skip_no_ffmpeg = pytest.mark.skipif(_ffmpeg_missing, reason="ffmpeg not on PATH")
+
+
+def _has_video_stream(path: str) -> bool:
+    r = subprocess.run(
+        [FFPROBE_BIN, "-v", "error", "-select_streams", "v",
+         "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+        capture_output=True, text=True,
+    )
+    return "video" in r.stdout
 
 
 @pytest.fixture(scope="module")
@@ -129,6 +138,43 @@ async def test_export_project_with_transform(media, tmp_path):
     assert Path(out).exists()
     d = ffmpeg_service._get_duration(out)
     assert 0.5 < d < 1.8  # ~1s from a 2s source at 2x
+
+
+@skip_no_ffmpeg
+async def test_export_trim_keeps_video_stream(media, tmp_path):
+    """Regression: trimming to a non-keyframe must not drop the video stream.
+
+    The old stream-copy trim produced an audio-only file, so every trimmed
+    export failed downstream ("matches no streams").
+    """
+    from app.services.ffmpeg_service import export_project
+    out = str(tmp_path / "trim.mp4")
+    await export_project(
+        clips=[{"media_path": media["clips"][0], "in_point": 0.5, "out_point": 1.5}],
+        audio_tracks=[], subtitles=[], output_path=out)
+    assert Path(out).exists()
+    assert _has_video_stream(out), "trimmed export lost its video stream"
+    assert 0.7 < ffmpeg_service._get_duration(out) < 1.4  # ~1s window, accurate
+
+
+@skip_no_ffmpeg
+async def test_export_silent_clip_plus_music(media, tmp_path):
+    """A clip with no audio plus an added music track must still export."""
+    from app.services.ffmpeg_service import export_project
+    silent = str(tmp_path / "silent.mp4")
+    subprocess.run(
+        [FFMPEG_BIN, "-y", "-f", "lavfi",
+         "-i", "testsrc=duration=2:size=320x240:rate=10",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", silent],
+        check=True, capture_output=True)
+    out = str(tmp_path / "music.mp4")
+    await export_project(
+        clips=[{"media_path": silent, "in_point": 0, "out_point": -1}],
+        audio_tracks=[{"media_path": media["music"], "volume": 0.5,
+                       "fade_in": 0, "fade_out": 0}],
+        subtitles=[], output_path=out)
+    assert Path(out).exists()
+    assert _has_video_stream(out)
 
 
 @skip_no_ffmpeg
